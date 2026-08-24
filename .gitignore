@@ -1,0 +1,28 @@
+# secrets
+.env
+.env.*
+!.env.example
+.envrc
+.direnv/
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
+.terraform.lock.hcl
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# flow artifacts
+.claude/*.local.md
+.claude/quality/
+.claude/verification/
+.qa-report/
