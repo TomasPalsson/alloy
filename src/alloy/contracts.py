@@ -12,6 +12,10 @@ from typing import Any, Literal, TypeAlias
 JsonSchema: TypeAlias = dict[str, Any]
 Role: TypeAlias = Literal["user", "assistant", "tool"]
 
+# One streaming event. Keys mirror Strands: "data" (text delta), "message",
+# "current_tool_use", "result". Absent keys mean "nothing of that kind happened".
+StreamEvent: TypeAlias = dict[str, Any]
+
 
 class AlloyError(Exception):
     """Base for every error this package raises. Callers may catch this alone."""
@@ -23,6 +27,10 @@ class ToolSchemaError(AlloyError):
 
 class UnknownToolError(AlloyError):
     """The backend asked for a tool this agent does not hold."""
+
+
+class ToolArgumentError(AlloyError):
+    """Arguments do not match the tool's schema. Raised before the tool runs."""
 
 
 class BackendAuthError(AlloyError):

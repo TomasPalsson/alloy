@@ -6,7 +6,7 @@
 **Size**: Medium
 **Author**: Tomas Pálsson (via flow)
 **Created**: 2026-08-24
-**Version**: 1.2 (post harsh-judge fixes)
+**Version**: 1.3 (async surface completed)
 
 ---
 
@@ -31,6 +31,8 @@
 - No multi-agent orchestration — Foundry's equivalents are deprecated or sunset 2026-12-01.
 - No cross-process session persistence — history lives in the `Agent` instance.
 - No `hooks` or `callback_handler` — Strands has them; they do not earn their place in v1.
+- No native async client — `invoke_async` and `stream_async` reach the confirmed sync client through
+  `asyncio.to_thread`. `azure.ai.projects.aio` is only hinted at in the research, never verified.
 - No custom retry/backoff — `azure-ai-projects` has its own policy.
 - No typed wrappers for Foundry built-in tools (Code Interpreter, File Search, Bing) — their class names are unverified. Raw objects pass through instead.
 
@@ -116,8 +118,13 @@ print(result)          # stringifiable, like Strands
 result.text            # AZURE-SPECIFIC explicit accessor — Strands' AgentResult
                        # attributes were never confirmed in research, so we define a clean one
 
+result = await agent.invoke_async("...")   # Strands; async, no streaming
+
 async for event in agent.stream_async("..."):
-    ...                # dict events, Strands-shaped keys: data, message, current_tool_use, result
+    ...                # StreamEvent dicts, Strands-shaped keys: data, message,
+                       # current_tool_use, result
+
+agent.tool.get_oncall(team="data")   # Strands; run a held tool directly, no model call
 
 agent.messages         # Strands: in-memory conversation history
 ```
@@ -217,6 +224,10 @@ agent.messages         # Strands: in-memory conversation history
 | AC-030 | A backend yielding text deltas | `async for e in agent.stream_async("q")` | events with a `data` key arrive in order and concatenate to the full text | MUST |
 | AC-031 | A backend that does not support streaming | `stream_async` is used | `StreamingUnsupportedError` is raised, naming the backend limitation | MUST |
 | AC-032 | A streaming run that invokes a tool | streaming proceeds | a `current_tool_use` event is yielded before the tool result is submitted | SHOULD |
+| AC-033 | A running event loop | `await agent.invoke_async("q")` | an `AgentResult` is returned and the loop was never blocked (a concurrent task made progress during the call) | MUST |
+| AC-034 | A stream abandoned mid-iteration | the consumer breaks out of the `async for` | the worker thread terminates and no thread is left alive | MUST |
+| AC-042 | An agent holding a tool named `get_oncall` | `agent.tool.get_oncall(team="data")` | the function runs and returns its value with NO backend call made | MUST |
+| AC-043 | An agent holding no tool named `nope` | `agent.tool.nope()` | `UnknownToolError` naming the attribute | MUST |
 
 ---
 
@@ -242,6 +253,9 @@ agent.messages         # Strands: in-memory conversation history
 | FR-016 | System | MUST raise `VersionCapError` rather than a backend error when agent versions are exhausted, naming the agent and the cap | MUST | AC-023 |
 | FR-014 | System | MUST surface a named `BackendAuthError` when the backend rejects the caller's credential or its token has expired, without leaking the token value | MUST | AC-050, AC-051 |
 | FR-015 | System | SHOULD emit a `current_tool_use` event during a streaming run that invokes a tool | SHOULD | AC-032 |
+| FR-017 | SDK consumer | MUST be able to `await agent.invoke_async(prompt)` without blocking the event loop | MUST | AC-033 |
+| FR-018 | System | MUST terminate the streaming worker thread when the consumer abandons the stream | MUST | AC-034 |
+| FR-019 | SDK consumer | MUST be able to invoke a held tool directly via `agent.tool.<name>(**kwargs)` with no backend call | MUST | AC-042, AC-043 |
 
 ### 4.2 Data Requirements
 

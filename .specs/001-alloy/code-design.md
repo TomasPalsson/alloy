@@ -12,7 +12,9 @@ A type you need that is not there is an escalation, never a local declaration.
 | system prompt | `system_prompt` | public API | instructions, prompt, sys_prompt |
 | fingerprint | `fingerprint` | `_versions` | hash, digest, signature |
 
-Every public function is sync except `Agent.stream_async`, the only `async def`.
+Public API is sync except `Agent.invoke_async` and `Agent.stream_async`. Both are `async def` and
+both reach the sync backend through `asyncio.to_thread` — they never block the caller's event loop.
+Enforced by `tests/test_design_rules.py::test_only_two_async_defs` (AST walk of `src/alloy/`).
 
 ## 2. Type contracts & trust boundaries
 
@@ -28,8 +30,8 @@ tool name; truncating tool output.
 
 ## 3. Error taxonomy
 
-Closed set in `contracts.py`: `AlloyError` · `ToolSchemaError` · `UnknownToolError` ·
-`BackendAuthError` · `VersionCapError` · `StreamingUnsupportedError`. Adding a variant is a design
+Closed set in `contracts.py`: `AlloyError` · `ToolSchemaError` · `ToolArgumentError` ·
+`UnknownToolError` · `BackendAuthError` · `VersionCapError` · `StreamingUnsupportedError`. Adding a variant is a design
 change — escalate. All **thrown**, except a tool's own exception, which is **returned** on
 `ToolResult.failure` and surfaced on `AgentResult.tool_failures`. Backend errors chain the SDK
 exception as `__cause__`.
@@ -59,16 +61,23 @@ module's AST and fails on either import.
 | Endpoint | env `AZURE_AI_PROJECT_ENDPOINT` | ctor arg `endpoint=` overrides | `FoundryClient` |
 | Conversation id | `FoundryClient`, first call | held on the `Agent` instance | `_agent` |
 
-`AZURE_AI_PROJECT_ENDPOINT` is the only env var read. Tests inject a stub through `client=` — there
-is no interface to implement, only a shape to match.
+`AZURE_AI_PROJECT_ENDPOINT` is the only env var read, and only `_foundry.py` may read it — enforced by
+`tests/test_design_rules.py::test_env_reads_confined_to_foundry` (AST walk for `os.environ`/`os.getenv`).
+Tests inject a stub through `client=` — no interface to implement, only a shape to match.
 
 ## 6. Deliberately duplicated — do NOT consolidate
 
 - **`json` calls.** Each module calls `json` directly. No `_json.py`.
 - **Error messages.** Written at the raise site. No message-template module.
-- **No retry/backoff anywhere.** `azure-ai-projects` owns retries. A slice that feels it needs one is
-  an escalation, not a local loop.
-- **No `utils/`.** A helper used by one module lives in that module.
+- **Argument validation is duplicated on purpose.** `_schema.derive` validates a *signature* at
+  decoration time; `_loop` validates *model-supplied arguments* against the derived schema at call
+  time, raising `ToolArgumentError` before the tool runs. These look similar and are not — do NOT
+  extract a shared validator. `_loop` owns Journey 1's absent-argument edge case.
+- **No retry/backoff anywhere.** `azure-ai-projects` owns retries. Enforced by
+  `tests/test_design_rules.py::test_no_retry_primitives` (grep for `time.sleep`, `tenacity`,
+  `backoff` outside `tests/`).
+- **No `utils/`.** A helper used by one module lives in that module. Enforced by
+  `tests/test_design_rules.py::test_no_utils_module` (path check over `src/alloy/`).
 
 ## 7. Decisions
 
@@ -76,6 +85,7 @@ is no interface to implement, only a shape to match.
 - Lifecycle, facing **Foundry's 1,000-version cap and repeated script runs**: chose **`fingerprint(...)` gating `create_version`**, rejected **create-on-construct**, to get free construction and idempotent reruns, accepting **a collision would silently reuse a stale version**. `Makes hard:` per-call definition overrides — touches `_agent.py`, `_versions.py`.
 - Tool failure, facing **AC-005 "the run does not raise"**: chose **`ToolResult.failure` + `AgentResult.tool_failures`**, rejected **propagating**, for model-side recovery, accepting **a silent failure is visible only if the caller looks**. `Makes hard:` fail-fast callers — touches `_loop.py`, `_agent.py`.
 - Streaming, facing **A-2 (Low confidence: `stream=True` unverified)**: chose **raising `StreamingUnsupportedError`**, rejected **chunking a complete response**, for an honest failure, accepting **no streaming until Foundry is confirmed**. `Makes hard:` a streaming-always API — touches `_agent.py`.
+- Async, facing **`get_openai_client()` returning a documented SYNC `openai.OpenAI`, with an async variant only hinted at**: chose **`asyncio.to_thread` for `invoke_async`, and a worker thread pumping the sync stream iterator into an `asyncio.Queue` for `stream_async`**, rejected **`azure.ai.projects.aio`**, to use only verified surface without blocking the event loop, accepting **one thread hop per call and a queue to drain on cancellation**. `Makes hard:` true end-to-end async — touches `_foundry.py` only.
 
 ---
 
@@ -97,16 +107,23 @@ THE FIVE   (1) NEVER invent an error type, field name or result shape that alrea
 CONTRACT   `src/alloy/contracts.py`
 NAMES      `ToolSpec` · `ToolSchemaError` · `JsonSchema` not Schema/dict
 MODULE     `src/alloy/_schema.py` layer 1 · may import: contracts, stdlib · exports: `derive`, `tool` · seam: schema derivation
+           `src/alloy/__init__.py` layer 3 · re-export `ToolSchemaError` · seam: public API
 CALLS      `derive(fn: Callable[..., Any]) -> ToolSpec` · `tool(fn=None, *, name: str | None = None, description: str | None = None)`
-DUPLICATE  Google-style docstring parsing lives here only. No shared `_docstring.py`.
+DUPLICATE  Google-style docstring parsing lives here only. No shared `_docstring.py`. Signature
+           validation lives here; ARGUMENT validation is `_loop`'s — do not share a validator.
 THE FIVE   (as Slice 1)
 
 ## Contract for this slice — Slice 3: Tool-call loop
 CONTRACT   `src/alloy/contracts.py`
 NAMES      `ToolCall`(calls) · `ToolResult`(results) · `UnknownToolError`
 MODULE     `src/alloy/_loop.py` layer 1 · may import: contracts, stdlib · exports: `extract_tool_calls`, `decode_arguments`, `run_calls` · seam: tool loop
+           `src/alloy/_agent.py` layer 2 · wire the loop into the run · seam: orchestration
+           `src/alloy/__init__.py` layer 3 · re-export `UnknownToolError`, `ToolArgumentError` · seam: public API
 CALLS      `extract_tool_calls(response: Any) -> list[ToolCall]` · `decode_arguments(raw: str) -> dict[str, Any]` · `run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[ToolResult]`
+           `Agent.tool` -> attribute namespace over the agent's own `ToolSpec` map; `agent.tool.<name>(**kwargs)` runs it with NO model call. Unknown attribute -> `UnknownToolError`.
 DUPLICATE  A tool's exception is RETURNED on `ToolResult.failure`, never raised. No retry loop.
+           Arguments not matching the derived schema raise `ToolArgumentError` BEFORE the tool runs
+           (Journey 1 edge case). Do not reuse `_schema`'s signature validator for this.
 THE FIVE   (as Slice 1)
 
 ## Contract for this slice — Slice 4: Conversation state and history
@@ -121,22 +138,34 @@ THE FIVE   (as Slice 1)
 CONTRACT   `src/alloy/contracts.py`
 NAMES      `fingerprint` not hash/digest/signature · `VersionCapError`
 MODULE     `src/alloy/_versions.py` layer 1 · may import: contracts, stdlib · exports: `fingerprint` · seam: version identity
+           `src/alloy/_agent.py` layer 2 · call `fingerprint` before each run · seam: orchestration
+           `src/alloy/__init__.py` layer 3 · re-export `VersionCapError` · seam: public API
 CALLS      `fingerprint(model: str, system_prompt: str, tool_schemas: Sequence[JsonSchema]) -> str`
 DUPLICATE  Hashing lives here only. `_agent.py` calls it; it never re-implements it.
 THE FIVE   (as Slice 1)
 
-## Contract for this slice — Slice 6: Streaming
+## Contract for this slice — Slice 6: Async — streaming (PRIORITY) and invoke
 CONTRACT   `src/alloy/contracts.py`
-NAMES      `StreamingUnsupportedError`
+NAMES      `StreamEvent` not Chunk/Delta/Event · `StreamingUnsupportedError`
 MODULE     `src/alloy/_agent.py` layer 2 · seam: orchestration
-CALLS      `Agent.stream_async(self, prompt: str) -> AsyncIterator[dict[str, Any]]`
-DUPLICATE  NEVER emulate streaming by chunking a complete response — raise instead (Decision 4).
+           `src/alloy/_foundry.py` layer 1 · owns the thread hop · seam: Azure adapter
+           `src/alloy/_loop.py` layer 1 · emit `current_tool_use` from the loop · seam: tool loop
+           `src/alloy/__init__.py` layer 3 · re-export `StreamingUnsupportedError` · seam: public API
+CALLS      `Agent.stream_async(self, prompt: str) -> AsyncIterator[StreamEvent]`
+           `Agent.invoke_async(self, prompt: str) -> AgentResult`
+           `FoundryClient.stream(self, **kwargs) -> Iterator[Any]`  (sync; the adapter owns it)
+DUPLICATE  The sync backend is reached through `asyncio.to_thread` in `_foundry.py` ONLY. `_agent.py`
+           never calls `to_thread` itself. `stream_async` pumps the sync iterator on a worker thread
+           into an `asyncio.Queue`; the queue is drained and the thread joined on cancellation.
+           NEVER emulate streaming by chunking a complete response — raise instead (Decision 4).
 THE FIVE   (as Slice 1)
 
 ## Contract for this slice — Slice 7: Foundry adapter, auth, example
 CONTRACT   `src/alloy/contracts.py`
 NAMES      `BackendAuthError` · `FoundryClient`
 MODULE     `src/alloy/_foundry.py` layer 1 · may import: contracts, `azure.*`, `openai` · exports: `FoundryClient` · seam: Azure adapter
+           `src/alloy/_versions.py` layer 1 · list/create versions by fingerprint · seam: version identity
+           `src/alloy/__init__.py` layer 3 · re-export `BackendAuthError` · seam: public API
 CALLS      `FoundryClient.__init__(self, *, endpoint: str | None = None, credential: object | None = None) -> None`
            `resolve_endpoint(explicit: str | None) -> str`
 DUPLICATE  This is the ONLY module that may import `azure.*` or `openai`. `AIProjectClient` must be constructed with `allow_preview=True` or `get_openai_client(agent_name=...)` raises `ValueError`. Map SDK auth exceptions to `BackendAuthError` here and nowhere else; never let a token reach the message.
