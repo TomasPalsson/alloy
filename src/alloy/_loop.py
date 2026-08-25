@@ -14,6 +14,7 @@ from .contracts import (
     ToolSpec,
     UnknownToolError,
 )
+from .hooks import AfterToolCallEvent, BeforeToolCallEvent, HookRegistry
 
 
 def extract_tool_calls(response: Any) -> list[ToolCall]:
@@ -40,13 +41,36 @@ def decode_arguments(raw: str) -> dict[str, Any]:
     return json.loads(raw)
 
 
-def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[ToolResult]:
-    """Run each requested tool locally; every outcome becomes a ToolResult, nothing raises."""
+def run_calls(
+    calls: Sequence[ToolCall],
+    tools: Mapping[str, ToolSpec],
+    agent: Any = None,
+    hooks: HookRegistry | None = None,
+) -> list[ToolResult]:
+    """Run each requested tool locally; every outcome becomes a ToolResult, nothing raises.
+
+    When `hooks` is given, BeforeToolCallEvent/AfterToolCallEvent fire around every call,
+    on every exit path (including cancellation and the unknown-tool/argument-error paths).
+    A hook may cancel the call (`cancel_tool`, which outranks an unknown tool name — the
+    cancel check sits above the tool lookup), rewrite its arguments (`tool_use`), or
+    replace the outcome (`result`). See hooks.py and spec.md AC-08..AC-17c.
+    """
     results: list[ToolResult] = []
     for call in calls:
+        cancel_reason: str | None = None
+        if hooks is not None:
+            before = hooks.emit(BeforeToolCallEvent(agent=agent, tool_use=call))
+            call = before.tool_use
+            cancel_reason = before.cancel_tool
+
+        if cancel_reason is not None:
+            results.append(_emit_after(hooks, agent, call, _cancelled(call, cancel_reason)))
+            continue
+
         spec = tools.get(call.name)
         if spec is None:
-            results.append(_failure(call, UnknownToolError(f"no tool named {call.name!r}")))
+            failure = UnknownToolError(f"no tool named {call.name!r}")
+            results.append(_emit_after(hooks, agent, call, _failure(call, failure)))
             continue
 
         try:
@@ -55,7 +79,7 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
             failure = ToolArgumentError(
                 f"tool {call.name!r} received malformed JSON arguments: {exc}"
             )
-            results.append(_failure(call, failure))
+            results.append(_emit_after(hooks, agent, call, _failure(call, failure)))
             continue
 
         missing = [name for name in spec.parameters.get("required", []) if name not in arguments]
@@ -63,16 +87,18 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
             failure = ToolArgumentError(
                 f"tool {call.name!r} is missing required argument(s): {', '.join(missing)}"
             )
-            results.append(_failure(call, failure))
+            results.append(_emit_after(hooks, agent, call, _failure(call, failure)))
             continue
 
         try:
             value = spec.call(**arguments)
+            output = json.dumps(value)
         except Exception as exc:  # the tool's own failure: returned, never raised (see contract)
-            results.append(_failure(call, exc))
+            results.append(_emit_after(hooks, agent, call, _failure(call, exc)))
             continue
 
-        results.append(ToolResult(call_id=call.call_id, output=json.dumps(value)))
+        success = ToolResult(call_id=call.call_id, output=output)
+        results.append(_emit_after(hooks, agent, call, success))
     return results
 
 
@@ -80,6 +106,20 @@ def _failure(call: ToolCall, error: Exception) -> ToolResult:
     """Build the ToolResult for a call that never ran its tool."""
     output = json.dumps({"error": str(error)})
     return ToolResult(call_id=call.call_id, output=output, failure=error)
+
+
+def _cancelled(call: ToolCall, reason: str) -> ToolResult:
+    """Build the ToolResult for a call a hook blocked before it ran (D4: not a failure)."""
+    return ToolResult(call_id=call.call_id, output=json.dumps({"cancelled": reason}))
+
+
+def _emit_after(
+    hooks: HookRegistry | None, agent: Any, call: ToolCall, result: ToolResult
+) -> ToolResult:
+    """Fire AfterToolCallEvent when hooks are registered; pass the result through otherwise."""
+    if hooks is None:
+        return result
+    return hooks.emit(AfterToolCallEvent(agent=agent, tool_use=call, result=result)).result
 
 
 def translate_stream_event(raw_event: Any) -> StreamEvent | None:

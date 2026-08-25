@@ -11,6 +11,7 @@ from alloy import Agent, AlloyError, ToolArgumentError, UnknownToolError
 from alloy._loop import run_calls
 from alloy._schema import derive, tool
 from alloy.contracts import ToolCall
+from conftest import StubConversations
 
 
 class _FunctionCallItem:
@@ -39,20 +40,10 @@ class _StubResponses:
         return self._responses[len(self.calls) - 1]
 
 
-class _StubConversation:
-    def __init__(self, id: str) -> None:
-        self.id = id
-
-
-class _StubConversations:
-    def create(self, **kwargs: Any) -> _StubConversation:
-        return _StubConversation("conv_1")
-
-
 class _StubClient:
     def __init__(self, responses: list[_StubResponse]) -> None:
         self.responses = _StubResponses(responses)
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
 
 
 def test_b8_runs_matching_tool_and_submits_result_back() -> None:

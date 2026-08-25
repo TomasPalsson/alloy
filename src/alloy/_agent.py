@@ -16,8 +16,8 @@ from ._loop import (
     run_calls,
     translate_stream_event,
 )
-from ._schema import derive
 from ._versions import fingerprint
+from .hooks import AfterInvocationEvent, BeforeInvocationEvent, HookProvider, HookRegistry
 
 # Set by `tool()` in _schema.py; a plain, non-decorated tool lacks it and is forwarded
 # to the backend unmodified rather than derived (see B7, B11 — it's never run locally).
@@ -60,11 +60,12 @@ class Agent:
         endpoint: str | None = None,
         credential: object | None = None,
         client: object | None = None,
+        hooks: Sequence[HookProvider] = (),
     ) -> None:
         self._model = model
         self._system_prompt = system_prompt
         self._tool_specs = [
-            derive(cast(Callable[..., Any], t))
+            cast(contracts.ToolSpec, getattr(t, _TOOL_SPEC_ATTRIBUTE))
             for t in tools
             if hasattr(t, _TOOL_SPEC_ATTRIBUTE)
         ]
@@ -81,6 +82,9 @@ class Agent:
         self._project_client = client
         self._messages: list[contracts.Message] = []
         self._conversation_id: str | None = None
+        self._hooks = HookRegistry()
+        for provider in hooks:
+            self._hooks.add_hook(provider)
 
     @property
     def messages(self) -> list[contracts.Message]:
@@ -92,32 +96,19 @@ class Agent:
         """Direct, model-free invocation of this agent's own tools by name."""
         return _ToolNamespace(self._tool_map)
 
+    @property
+    def hooks(self) -> HookRegistry:
+        """This agent's live hook registry; `agent.hooks.add_hook(...)` affects future runs."""
+        return self._hooks
+
     def __call__(self, prompt: str) -> contracts.AgentResult:
         """Send a prompt to the model and return its result, running any tool calls it makes.
 
         Args:
             prompt: The user prompt to send.
         """
-        if self._client is None:
-            foundry_client = _foundry.FoundryClient(
-                endpoint=self._endpoint, credential=self._credential
-            )
-            self._project_client = foundry_client.project
-            self._client = foundry_client.get_openai_client(agent_name=self._name)
-        client = cast(Any, self._client)
-
-        # Version tracking needs an agent_name on the backend, so it's opt-in via name=.
-        if self._name is not None:
-            self._ensure_version()
-
-        # Conversation is created lazily on first call so __init__ stays call-free (see B2).
-        # It's the service's id, never a locally invented one — the Responses API's
-        # `conversation=` prepends that conversation's items automatically, so only the
-        # new turn's items (the prompt, then tool outputs) go in `input=` below.
-        if self._conversation_id is None:
-            self._conversation_id = _foundry.create_conversation(client)
-
-        self._messages.append(contracts.Message(role="user", content=prompt))
+        self._begin(prompt)
+        client = self._prepare_call()
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -135,7 +126,7 @@ class Agent:
                 break
 
             next_input = []
-            for result in run_calls(calls, self._tool_map):
+            for result in run_calls(calls, self._tool_map, agent=self, hooks=self._hooks):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
@@ -151,8 +142,7 @@ class Agent:
                 f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
             )
 
-        self._messages.append(contracts.Message(role="assistant", content=text))
-        return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+        return self._finish(text, tool_failures)
 
     async def invoke_async(self, prompt: str) -> contracts.AgentResult:
         """Same as `__call__`, but the blocking backend call runs off the event loop.
@@ -160,7 +150,10 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
-        client = await _foundry.run_off_thread(self._prepare_call, prompt)
+        # _begin runs here, on the caller's thread, so the hook fires before any
+        # backend call and on the same thread as _finish's (AC-06).
+        self._begin(prompt)
+        client = await _foundry.run_off_thread(self._prepare_call)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -176,7 +169,7 @@ class Agent:
                 break
 
             next_input = []
-            for result in run_calls(calls, self._tool_map):
+            for result in run_calls(calls, self._tool_map, agent=self, hooks=self._hooks):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
@@ -192,8 +185,7 @@ class Agent:
                 f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
             )
 
-        self._messages.append(contracts.Message(role="assistant", content=text))
-        return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+        return self._finish(text, tool_failures)
 
     async def stream_async(self, prompt: str) -> AsyncIterator[contracts.StreamEvent]:
         """Stream a prompt's response as it arrives, running any tool calls the model makes.
@@ -208,7 +200,10 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
-        client = await _foundry.run_off_thread(self._prepare_call, prompt)
+        # _begin runs here, on the caller's thread, so the hook fires before any
+        # backend call and on the same thread as _finish's (AC-06).
+        self._begin(prompt)
+        client = await _foundry.run_off_thread(self._prepare_call)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -283,7 +278,7 @@ class Agent:
                 break
 
             next_input = []
-            for result in run_calls(pending_calls, self._tool_map):
+            for result in run_calls(pending_calls, self._tool_map, agent=self, hooks=self._hooks):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
@@ -299,14 +294,42 @@ class Agent:
                 f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
             )
 
-        self._messages.append(contracts.Message(role="assistant", content=text))
-        yield {"result": contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))}
+        yield {"result": self._finish(text, tool_failures)}
 
-    def _prepare_call(self, prompt: str) -> Any:
-        """Shared setup for `__call__`/`invoke_async`/`stream_async`.
+    def _begin(self, prompt: str) -> None:
+        """Record the prompt and fire `BeforeInvocationEvent`, before any backend work.
 
-        Validates the client, creates a backend version if needed, starts the
-        conversation, and records the prompt.
+        Split out of `_prepare_call` for two reasons, both load-bearing:
+
+        * AC-06 says this event fires *before any backend call*. `_prepare_call` performs
+          three of them — `list_versions`, `create_version`, `conversations.create` — so
+          emitting from inside it fired the hook after the fact. A "before" guardrail that
+          runs after a conversation has already been provisioned is not a guardrail.
+        * `_prepare_call` runs off the event loop for the two async paths, so emitting
+          there put `BeforeInvocationEvent` on a worker thread while `AfterInvocationEvent`
+          ran on the caller's. All three paths now call this directly, so both ends of a
+          call reach a hook on the same thread.
+
+        Still the single firing site for this event; the three call paths invoke it, they
+        do not each emit.
+
+        Args:
+            prompt: The user prompt about to be sent.
+        """
+        # Emit BEFORE recording: a hook that raises then leaves no orphaned user message
+        # in `self._messages` with no assistant reply after it, so a caller that catches
+        # the hook's exception and retries does not accumulate phantom turns. It also
+        # means the hook sees history as it was, without the prompt it is being asked
+        # to vet already appended to it.
+        self._hooks.emit(BeforeInvocationEvent(agent=self, prompt=prompt))
+        self._messages.append(contracts.Message(role="user", content=prompt))
+
+    def _prepare_call(self) -> Any:
+        """Backend setup for `__call__`/`invoke_async`/`stream_async`.
+
+        Builds the client, creates a version if the config changed, and starts the
+        conversation. Call `_begin` first — every backend call this makes must happen
+        after `BeforeInvocationEvent` has fired (AC-06).
         """
         if self._client is None:
             foundry_client = _foundry.FoundryClient(
@@ -322,8 +345,18 @@ class Agent:
         if self._conversation_id is None:
             self._conversation_id = _foundry.create_conversation(client)
 
-        self._messages.append(contracts.Message(role="user", content=prompt))
         return client
+
+    def _finish(self, text: str, tool_failures: list[Exception]) -> contracts.AgentResult:
+        """Shared teardown for `__call__`/`invoke_async`/`stream_async`.
+
+        Records the assistant's reply, emits `AfterInvocationEvent`, and builds the
+        `AgentResult` every call path returns.
+        """
+        self._messages.append(contracts.Message(role="assistant", content=text))
+        result = contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+        self._hooks.emit(AfterInvocationEvent(agent=self, result=result))
+        return result
 
     def _ensure_version(self) -> None:
         """Create a backend version for the current config, unless one already matches.

@@ -1,6 +1,13 @@
 """Shared contract for every alloy module. Import from here; never redeclare.
 
 Adding an error variant is a design change — escalate, do not add locally.
+
+Scope: this module owns the CROSS-CUTTING vocabulary — the error hierarchy, `Message`,
+`ToolSpec`, `ToolCall`, `ToolResult`, `AgentResult`. The hook vocabulary (the four
+lifecycle events, `HookProvider`, `HookRegistry`) lives in `hooks.py` instead, which owns
+it outright. The rule here is against two modules drifting apart on a shared type; a
+single owner satisfies it either way, and keeping the hook types beside the registry that
+dispatches them reads better than splitting them across two files.
 """
 
 from __future__ import annotations
