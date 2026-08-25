@@ -21,6 +21,7 @@ AG-UI dependencies present.
 | message identity | `message_id: str` | — | `agui.py` | msg_id, messageId, mid |
 | the request body | `run_input: RunAgentInput` | — | `ag_ui.core` | input, payload, request, body |
 | the new turn's prompt | `prompt: str`, from `latest_user_prompt` | — | `agui.py` | message, text, query, user_input |
+| one streamed argument fragment | `{"tool_arguments_delta": (call_id, delta)}` | — | `contracts.StreamEvent` | tool_args, arg_delta, arguments_delta, partial_args |
 | per-run mutable bookkeeping | `_RunState` | — | `agui.py` | context, ctx, session, tracker |
 | frontend-visible state | `state: dict[str, Any]` | — | `agui.py` | snapshot, store, model |
 | state keys | `messages` · `activeToolCalls` · `completedToolCalls` · `toolFailures` | — | shape pinned in `spec.md` §4.2 | tool_calls, active, completed, failures, errors |
@@ -217,6 +218,22 @@ The run's bracket state IS the conformance contract. `_RunState.phase` is a **5*
 `NOT_STARTED`, `OPEN`, `TEXT_OPEN`, `FINISHED`, `ERRORED` — so an exhaustive `match` in `agui.py`
 makes a missing pair a type error. Declare the `Literal` with all five or the exhaustiveness claim
 is false.
+
+**What `run_stream` actually consumes.** NOT raw Azure events. It consumes `Agent.stream_async()`,
+which yields alloy's own `contracts.StreamEvent` dicts: `{"data": str}`, `{"current_tool_use":
+contracts.ToolCall}`, `{"result": contracts.AgentResult}`. Azure's raw types (Appendix D) are
+`_loop.py`'s business. The table below is written in terms of alloy's shapes, and the Azure column
+in Appendix D describes where `_loop.py` gets them from — two different layers, one table each.
+
+alloy's stream carries no text-open or text-close signal, only deltas, so `run_stream` SYNTHESIZES
+`TEXT_MESSAGE_START` on the first delta and `TEXT_MESSAGE_END` at the two points the single-open
+rule forces: before a tool call opens, and before the terminal event.
+
+**Slice 5's new stream shape.** Incremental tool arguments need a shape alloy's stream does not
+have today. It is `{"tool_arguments_delta": (call_id, delta)}` — a two-tuple of `str`, matching
+`_loop.extract_tool_argument_delta`'s return. Pinned here so slices 4 and 5 cannot invent two
+different keys for it. `{"current_tool_use": ToolCall}` keeps its current meaning: a COMPLETE
+tool call, which is what `TOOL_CALL_END` is emitted from.
 
 **The single-open rule.** The reference client's validator (`verifyEvents` in `@ag-ui/client`) is
 strictly single-threaded: while a tool call is open, it rejects ANY other event, a new
