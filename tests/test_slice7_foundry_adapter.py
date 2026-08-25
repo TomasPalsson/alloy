@@ -15,7 +15,7 @@ from alloy import _foundry
 EXAMPLE_PATH = pathlib.Path(__file__).resolve().parents[1] / "examples" / "oncall.py"
 
 
-def test_B21_expired_credential_maps_to_backend_auth_error_naming_reauth(
+def test_b21_expired_credential_maps_to_backend_auth_error_naming_reauth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _raise_expired(*args: Any, **kwargs: Any) -> None:
@@ -24,12 +24,14 @@ def test_B21_expired_credential_maps_to_backend_auth_error_naming_reauth(
     monkeypatch.setattr(_foundry, "AIProjectClient", _raise_expired)
 
     with pytest.raises(alloy.BackendAuthError) as exc_info:
-        _foundry.FoundryClient(endpoint="https://example.services.ai.azure.com", credential=object())
+        _foundry.FoundryClient(
+            endpoint="https://example.services.ai.azure.com", credential=object()
+        )
 
     assert "re-authenticate" in str(exc_info.value).lower()
 
 
-def test_B22_backend_auth_error_never_leaks_token_or_secret(
+def test_b22_backend_auth_error_never_leaks_token_or_secret(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret_token = "sekrit-bearer-token-abc123XYZ"
@@ -40,14 +42,16 @@ def test_B22_backend_auth_error_never_leaks_token_or_secret(
     monkeypatch.setattr(_foundry, "AIProjectClient", _raise_with_token)
 
     with pytest.raises(alloy.BackendAuthError) as exc_info:
-        _foundry.FoundryClient(endpoint="https://example.services.ai.azure.com", credential=object())
+        _foundry.FoundryClient(
+            endpoint="https://example.services.ai.azure.com", credential=object()
+        )
 
     error = exc_info.value
     assert secret_token not in str(error)
     assert secret_token not in repr(error)
 
 
-def test_B24_missing_endpoint_raises_alloy_error_naming_the_variable(
+def test_b24_missing_endpoint_raises_alloy_error_naming_the_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("AZURE_AI_PROJECT_ENDPOINT", raising=False)

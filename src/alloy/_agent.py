@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
+import asyncio
+import threading
 import uuid
 import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -22,6 +23,9 @@ from ._versions import fingerprint
 # Set by `tool()` in _schema.py; a plain, non-decorated tool lacks it and is forwarded
 # to the backend unmodified rather than derived (see B7, B11 — it's never run locally).
 _TOOL_SPEC_ATTRIBUTE = "__alloy_tool_spec__"
+
+# Sentinel queued by stream_async's worker thread to signal "no more events this turn".
+_STREAM_DONE = object()
 
 
 class _ToolNamespace:
@@ -86,10 +90,9 @@ class Agent:
             prompt: The user prompt to send.
         """
         if self._client is None:
-            raise contracts.AlloyError(
-                "Agent has no client configured; pass client= explicitly "
-                "(building one from endpoint/credential is not yet supported)"
-            )
+            self._client = _foundry.FoundryClient(
+                endpoint=self._endpoint, credential=self._credential
+            ).get_openai_client(agent_name=self._name)
         client = cast(Any, self._client)
 
         # Version tracking needs an agent_name on the backend, so it's opt-in via name=.
@@ -157,6 +160,10 @@ class Agent:
         Yields `{"data": ...}` for each text delta, `{"current_tool_use": ToolCall(...)}`
         before a tool call is run, and finally `{"result": AgentResult(...)}`.
 
+        Runs the blocking stream iteration on a worker thread and relays events back
+        through a queue, so the thread hop lives on this `async def` rather than a
+        separate helper — this and `invoke_async` are the package's only two (see B30).
+
         Args:
             prompt: The user prompt to send.
         """
@@ -168,15 +175,50 @@ class Agent:
             final_text: str | None = None
             pending_calls: list[contracts.ToolCall] = []
 
-            async with contextlib.aclosing(
-                _foundry.stream_completion(
-                    client,
-                    model=self._model,
-                    messages=self._request_messages(),
-                    conversation_id=self._conversation_id,
-                )
-            ) as turn_events:
-                async for raw_event in turn_events:
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[Any] = asyncio.Queue()
+            stop_requested = threading.Event()
+            create_kwargs = {
+                "model": self._model,
+                "messages": self._request_messages(),
+                "conversation_id": self._conversation_id,
+            }
+
+            def _pump(
+                loop: asyncio.AbstractEventLoop = loop,
+                queue: asyncio.Queue[Any] = queue,
+                stop_requested: threading.Event = stop_requested,
+                create_kwargs: dict[str, Any] = create_kwargs,
+            ) -> None:
+                # Default-arg bound: without it, every iteration's closure would read
+                # the loop variables' final values instead of its own (ruff B023).
+                # A single try/except/finally so _STREAM_DONE is queued no matter where
+                # this fails — otherwise a consumer awaiting an empty queue would hang.
+                try:
+                    raw_stream = _foundry.open_stream(client, **create_kwargs)
+                    for raw_event in raw_stream:
+                        if stop_requested.is_set():
+                            return
+                        if getattr(raw_event, "type", None) == "error":
+                            raise contracts.AlloyError(
+                                getattr(raw_event, "message", "stream error")
+                            )
+                        loop.call_soon_threadsafe(queue.put_nowait, raw_event)
+                except Exception as exc:  # the dual error path: an SSE error raised directly
+                    loop.call_soon_threadsafe(queue.put_nowait, exc)
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, _STREAM_DONE)
+
+            pump_task = asyncio.ensure_future(asyncio.to_thread(_pump))
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is _STREAM_DONE:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    raw_event = item
+
                     text_event = translate_stream_event(raw_event)
                     if text_event is not None:
                         text_parts.append(cast(str, text_event["data"]))
@@ -190,6 +232,9 @@ class Agent:
                     done_text = extract_final_text_from_stream_event(raw_event)
                     if done_text is not None:
                         final_text = done_text
+            finally:
+                stop_requested.set()
+                await pump_task
 
             if not pending_calls:
                 text = final_text if final_text is not None else "".join(text_parts)
@@ -210,10 +255,9 @@ class Agent:
         conversation, and records the prompt.
         """
         if self._client is None:
-            raise contracts.AlloyError(
-                "Agent has no client configured; pass client= explicitly "
-                "(building one from endpoint/credential is not yet supported)"
-            )
+            self._client = _foundry.FoundryClient(
+                endpoint=self._endpoint, credential=self._credential
+            ).get_openai_client(agent_name=self._name)
         client = cast(Any, self._client)
 
         if self._name is not None:

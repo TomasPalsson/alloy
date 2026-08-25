@@ -26,7 +26,7 @@ def _imported_module_roots(tree: ast.Module) -> set[str]:
     return roots
 
 
-def test_B23_azure_and_openai_imports_confined_to_foundry() -> None:
+def test_b23_azure_and_openai_imports_confined_to_foundry() -> None:
     for path in _module_files():
         if path.name == "_foundry.py":
             continue
@@ -35,7 +35,7 @@ def test_B23_azure_and_openai_imports_confined_to_foundry() -> None:
         assert "openai" not in roots, f"{path.name} imports openai, only _foundry.py may"
 
 
-def test_B30_env_reads_confined_to_foundry() -> None:
+def test_b30_env_reads_confined_to_foundry() -> None:
     for path in _module_files():
         if path.name == "_foundry.py":
             continue
@@ -50,14 +50,14 @@ def test_B30_env_reads_confined_to_foundry() -> None:
                 raise AssertionError(f"{path.name} calls os.getenv, only _foundry.py may")
 
 
-def test_B30_no_utils_module_exists() -> None:
+def test_b30_no_utils_module_exists() -> None:
     names = {path.name for path in PACKAGE_ROOT.iterdir()}
     assert "utils.py" not in names
     assert "_utils.py" not in names
     assert "utils" not in names
 
 
-def test_B30_exactly_two_async_defs_in_package() -> None:
+def test_b30_exactly_two_async_defs_in_package() -> None:
     count = sum(
         1
         for path in _module_files()
@@ -67,7 +67,7 @@ def test_B30_exactly_two_async_defs_in_package() -> None:
     assert count == 2
 
 
-def test_B30_no_retry_primitives_outside_tests() -> None:
+def test_b30_no_retry_primitives_outside_tests() -> None:
     for path in _module_files():
         text = path.read_text()
         assert "time.sleep" not in text, f"{path.name} uses time.sleep"
