@@ -95,9 +95,9 @@ class Agent:
             for version in client.agents.list_versions(self._name):
                 if version.metadata.get("alloy_fingerprint") == current_fingerprint:
                     return
-        except Exception as error:  # any backend failure here just skips the dedup check
+        except Exception as list_error:  # any backend failure here just skips the dedup check
             warnings.warn(
-                f"Could not list existing versions for agent {self._name!r}: {error}",
+                f"Could not list existing versions for agent {self._name!r}: {list_error}",
                 stacklevel=2,
             )
 
@@ -112,7 +112,7 @@ class Agent:
                 definition=definition,
                 metadata={"alloy_fingerprint": current_fingerprint},
             )
-        except Exception as error:  # re-raised below as the domain-specific cap error
+        except Exception as create_error:  # re-raised below as the domain-specific cap error
             raise contracts.VersionCapError(
-                f"Agent {self._name!r} cannot create a new version: {error}"
-            ) from error
+                f"Agent {self._name!r} cannot create a new version: {create_error}"
+            ) from create_error
