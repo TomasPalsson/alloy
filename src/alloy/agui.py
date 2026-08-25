@@ -32,6 +32,7 @@ and tool calls looks legal under rules 1-7 alone and is still refused by a real 
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -490,7 +491,33 @@ async def run_stream(
 
 
 class ThreadStore:
-    """Maps an AG-UI `threadId` to the Foundry conversation id backing it."""
+    """Maps an AG-UI `threadId` to the Foundry conversation id backing it.
+
+    An AG-UI thread and a Foundry conversation are the same concept — server-held history
+    addressed by a client-supplied id — so this holds two strings per thread and never a
+    transcript. The conversation itself lives in Azure, under Azure's retention.
+
+    ponytail: process-local, bounded, lost on restart. Correct for one long-lived server;
+    on any multi-instance or scale-to-zero host a caller's second run can land on an
+    instance that never saw the first, and the agent silently forgets. Swap in a shared
+    store (Redis, or a conversation id echoed back to the client) — three methods.
+    """
+
+    def __init__(self, max_threads: int = 100) -> None:
+        """Create an empty store bounded at `max_threads` entries.
+
+        Args:
+            max_threads: How many threads to remember before evicting the least recently
+                used. 100 is a bound, not a measurement — see code-design.md section 8.
+        """
+        self._max_threads = max_threads
+        # Insertion-ordered and moved-to-end on every touch, so the first key is always
+        # the least recently used.
+        self._conversation_id_by_thread_id: OrderedDict[str, str] = OrderedDict()
+
+    def __len__(self) -> int:
+        """Return how many threads are currently remembered."""
+        return len(self._conversation_id_by_thread_id)
 
     def resolve(self, thread_id: str) -> str | None:
         """Return the conversation id remembered for `thread_id`, if any.
@@ -500,17 +527,57 @@ class ThreadStore:
 
         Returns:
             The remembered conversation id, or None if `thread_id` is unseen.
+
+        Raises:
+            ValueError: `thread_id` is blank.
         """
-        raise NotImplementedError
+        self._reject_blank(thread_id)
+        conversation_id = self._conversation_id_by_thread_id.get(thread_id)
+        if conversation_id is not None:
+            self._conversation_id_by_thread_id.move_to_end(thread_id)
+        return conversation_id
 
     def remember(self, thread_id: str, conversation_id: str) -> None:
-        """Record that `thread_id` maps to `conversation_id`.
+        """Record that `thread_id` maps to `conversation_id`, evicting if over the cap.
 
         Args:
             thread_id: The AG-UI thread id supplied by the client.
             conversation_id: The Foundry conversation id to associate with it.
+
+        Raises:
+            ValueError: `thread_id` is blank.
         """
-        raise NotImplementedError
+        self._reject_blank(thread_id)
+        self._conversation_id_by_thread_id[thread_id] = conversation_id
+        self._conversation_id_by_thread_id.move_to_end(thread_id)
+        while len(self._conversation_id_by_thread_id) > self._max_threads:
+            # Silent: a caller whose thread aged out is indistinguishable from a
+            # first-time caller, and both work.
+            self._conversation_id_by_thread_id.popitem(last=False)
+
+    def forget(self, thread_id: str) -> None:
+        """Drop `thread_id`'s mapping; silent when it is not held.
+
+        Called when the backend rejects a remembered conversation id, so the next run
+        mints a fresh one and completes normally rather than failing (AC-40).
+
+        Args:
+            thread_id: The AG-UI thread id to forget.
+        """
+        self._conversation_id_by_thread_id.pop(thread_id, None)
+
+    @staticmethod
+    def _reject_blank(thread_id: str) -> None:
+        """Refuse a blank thread id rather than letting every such caller share a thread.
+
+        Args:
+            thread_id: The id to check.
+
+        Raises:
+            ValueError: `thread_id` is empty or whitespace only.
+        """
+        if not thread_id.strip():
+            raise ValueError("thread id must not be blank")
 
 
 def _step_into(node: Any, token: str) -> Any:

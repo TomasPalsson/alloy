@@ -63,6 +63,7 @@ class Agent:
         credential: object | None = None,
         client: object | None = None,
         hooks: Sequence[HookProvider] = (),
+        conversation_id: str | None = None,
     ) -> None:
         self._model = model
         self._system_prompt = system_prompt
@@ -83,7 +84,10 @@ class Agent:
         # too); the real path below replaces this with the actual AIProjectClient.
         self._project_client = client
         self._messages: list[contracts.Message] = []
-        self._conversation_id: str | None = None
+        # Seeded, not always None: an agent built against an existing conversation resumes
+        # it, which is what lets one AG-UI thread span many runs. Fixed at construction —
+        # `_prepare_call` only mints one when this is still None.
+        self._conversation_id: str | None = conversation_id
         self._hooks = HookRegistry()
         for provider in hooks:
             self._hooks.add_hook(provider)
@@ -97,6 +101,11 @@ class Agent:
     def tool(self) -> _ToolNamespace:
         """Direct, model-free invocation of this agent's own tools by name."""
         return _ToolNamespace(self._tool_map)
+
+    @property
+    def conversation_id(self) -> str | None:
+        """The backend conversation this agent is bound to, or None until its first run."""
+        return self._conversation_id
 
     @property
     def hooks(self) -> HookRegistry:
