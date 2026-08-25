@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import threading
 import time
-from typing import Any
+from collections.abc import AsyncGenerator
+from typing import Any, cast
 
 import pytest
 
@@ -235,7 +236,8 @@ async def test_b26_abandoned_stream_terminates_worker_thread() -> None:
     agent = Agent(model="gpt-4o", client=client)
 
     seen = 0
-    async with contextlib.aclosing(agent.stream_async("hi")) as stream:
+    stream_events = cast(AsyncGenerator[Any, None], agent.stream_async("hi"))
+    async with contextlib.aclosing(stream_events) as stream:
         async for _ in stream:
             seen += 1
             if seen >= 3:

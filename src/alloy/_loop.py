@@ -6,7 +6,14 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .contracts import ToolArgumentError, ToolCall, ToolResult, ToolSpec, UnknownToolError
+from .contracts import (
+    StreamEvent,
+    ToolArgumentError,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    UnknownToolError,
+)
 
 
 def extract_tool_calls(response: Any) -> list[ToolCall]:
@@ -66,3 +73,36 @@ def _failure(call: ToolCall, error: Exception) -> ToolResult:
     """Build the ToolResult for a call that never ran its tool."""
     output = json.dumps({"error": str(error)})
     return ToolResult(call_id=call.call_id, output=output, failure=error)
+
+
+def translate_stream_event(raw_event: Any) -> StreamEvent | None:
+    """Translate one raw streaming SDK event into our StreamEvent shape.
+
+    Only text deltas ("response.output_text.delta") carry something to surface; any other
+    event type (lifecycle, tool-call structure, completion) yields None here — those are
+    handled by `extract_tool_call_from_stream_item` and `extract_final_text_from_stream_event`.
+    """
+    if getattr(raw_event, "type", None) == "response.output_text.delta":
+        return {"data": raw_event.delta}
+    return None
+
+
+def extract_tool_call_from_stream_item(raw_event: Any) -> ToolCall | None:
+    """Pull a finished tool call off a `response.output_item.done` event, if it holds one."""
+    if getattr(raw_event, "type", None) != "response.output_item.done":
+        return None
+    item = raw_event.item
+    if getattr(item, "type", None) != "function_call":
+        return None
+    return ToolCall(
+        call_id=str(item.call_id),
+        name=str(item.name),
+        arguments=decode_arguments(str(item.arguments)),
+    )
+
+
+def extract_final_text_from_stream_event(raw_event: Any) -> str | None:
+    """Pull the finalized assistant text off a `response.output_text.done` event."""
+    if getattr(raw_event, "type", None) == "response.output_text.done":
+        return str(raw_event.text)
+    return None

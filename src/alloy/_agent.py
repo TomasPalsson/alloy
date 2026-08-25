@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, cast
 
-from . import contracts
-from ._loop import extract_tool_calls, run_calls
+from . import _foundry, contracts
+from ._loop import (
+    extract_final_text_from_stream_event,
+    extract_tool_call_from_stream_item,
+    extract_tool_calls,
+    run_calls,
+    translate_stream_event,
+)
 from ._schema import derive
 from ._versions import fingerprint
 
@@ -114,6 +121,109 @@ class Agent:
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+
+    async def invoke_async(self, prompt: str) -> contracts.AgentResult:
+        """Same as `__call__`, but the blocking backend call runs off the event loop.
+
+        Args:
+            prompt: The user prompt to send.
+        """
+        client = self._prepare_call(prompt)
+
+        tool_failures: list[Exception] = []
+        while True:
+            response = await _foundry.create_completion(
+                client,
+                model=self._model,
+                messages=self._request_messages(),
+                conversation_id=self._conversation_id,
+            )
+            calls = extract_tool_calls(response)
+            if not calls:
+                text = response.choices[0].message.content
+                break
+
+            for result in run_calls(calls, self._tool_map):
+                if result.failure is not None:
+                    tool_failures.append(result.failure)
+                self._messages.append(contracts.Message(role="tool", content=result.output))
+
+        self._messages.append(contracts.Message(role="assistant", content=text))
+        return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+
+    async def stream_async(self, prompt: str) -> AsyncIterator[contracts.StreamEvent]:
+        """Stream a prompt's response as it arrives, running any tool calls the model makes.
+
+        Yields `{"data": ...}` for each text delta, `{"current_tool_use": ToolCall(...)}`
+        before a tool call is run, and finally `{"result": AgentResult(...)}`.
+
+        Args:
+            prompt: The user prompt to send.
+        """
+        client = self._prepare_call(prompt)
+
+        tool_failures: list[Exception] = []
+        while True:
+            text_parts: list[str] = []
+            final_text: str | None = None
+            pending_calls: list[contracts.ToolCall] = []
+
+            async with contextlib.aclosing(
+                _foundry.stream_completion(
+                    client,
+                    model=self._model,
+                    messages=self._request_messages(),
+                    conversation_id=self._conversation_id,
+                )
+            ) as turn_events:
+                async for raw_event in turn_events:
+                    text_event = translate_stream_event(raw_event)
+                    if text_event is not None:
+                        text_parts.append(cast(str, text_event["data"]))
+                        yield text_event
+
+                    call = extract_tool_call_from_stream_item(raw_event)
+                    if call is not None:
+                        pending_calls.append(call)
+                        yield {"current_tool_use": call}
+
+                    done_text = extract_final_text_from_stream_event(raw_event)
+                    if done_text is not None:
+                        final_text = done_text
+
+            if not pending_calls:
+                text = final_text if final_text is not None else "".join(text_parts)
+                break
+
+            for result in run_calls(pending_calls, self._tool_map):
+                if result.failure is not None:
+                    tool_failures.append(result.failure)
+                self._messages.append(contracts.Message(role="tool", content=result.output))
+
+        self._messages.append(contracts.Message(role="assistant", content=text))
+        yield {"result": contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))}
+
+    def _prepare_call(self, prompt: str) -> Any:
+        """Shared setup for `__call__`/`invoke_async`/`stream_async`.
+
+        Validates the client, creates a backend version if needed, starts the
+        conversation, and records the prompt.
+        """
+        if self._client is None:
+            raise contracts.AlloyError(
+                "Agent has no client configured; pass client= explicitly "
+                "(building one from endpoint/credential is not yet supported)"
+            )
+        client = cast(Any, self._client)
+
+        if self._name is not None:
+            self._ensure_version(client)
+
+        if self._conversation_id is None:
+            self._conversation_id = str(uuid.uuid4())
+
+        self._messages.append(contracts.Message(role="user", content=prompt))
+        return client
 
     def _request_messages(self) -> list[dict[str, str]]:
         """Build the request payload from the system prompt and conversation so far."""
