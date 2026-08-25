@@ -56,7 +56,7 @@ class _StubClient:
         self.chat = _StubChat(self.completions)
 
 
-def test_B1_derives_schema_from_type_hints() -> None:
+def test_b1_derives_schema_from_type_hints() -> None:
     spec = derive(get_weather)
 
     assert spec.name == "get_weather"
@@ -72,7 +72,7 @@ def test_B1_derives_schema_from_type_hints() -> None:
     assert spec.parameters["required"] == ["city"]
 
 
-def test_B2_construction_makes_zero_calls_against_client() -> None:
+def test_b2_construction_makes_zero_calls_against_client() -> None:
     client = _StubClient()
 
     Agent(model="gpt-4o", tools=[get_weather], client=client)
@@ -80,7 +80,7 @@ def test_B2_construction_makes_zero_calls_against_client() -> None:
     assert client.completions.call_count == 0
 
 
-def test_B3_plain_text_response_becomes_agent_result() -> None:
+def test_b3_plain_text_response_becomes_agent_result() -> None:
     client = _StubClient(content="The sky is blue.")
     agent = Agent(model="gpt-4o", client=client)
 
@@ -91,7 +91,7 @@ def test_B3_plain_text_response_becomes_agent_result() -> None:
     assert str(result) == "The sky is blue."
 
 
-def test_B4_never_called_agent_has_empty_messages() -> None:
+def test_b4_never_called_agent_has_empty_messages() -> None:
     agent = Agent(model="gpt-4o", client=_StubClient())
 
     assert agent.messages == []

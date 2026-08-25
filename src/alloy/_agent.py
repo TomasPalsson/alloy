@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 from . import contracts
+from ._schema import derive
 
 
 class Agent:
@@ -21,12 +23,19 @@ class Agent:
         credential: object | None = None,
         client: object | None = None,
     ) -> None:
-        raise NotImplementedError
+        self._model = model
+        self._system_prompt = system_prompt
+        self._tool_specs = [derive(cast(Callable[..., Any], t)) for t in tools]
+        self._name = name
+        self._endpoint = endpoint
+        self._credential = credential
+        self._client = client
+        self._messages: list[contracts.Message] = []
 
     @property
     def messages(self) -> list[contracts.Message]:
         """Read-only view of the conversation history so far."""
-        raise NotImplementedError
+        return list(self._messages)
 
     def __call__(self, prompt: str) -> contracts.AgentResult:
         """Send a prompt to the model and return its result.
@@ -34,4 +43,22 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
-        raise NotImplementedError
+        if self._client is None:
+            raise contracts.AlloyError(
+                "Agent has no client configured; pass client= explicitly "
+                "(building one from endpoint/credential is not yet supported)"
+            )
+        client = cast(Any, self._client)
+
+        self._messages.append(contracts.Message(role="user", content=prompt))
+
+        request_messages: list[dict[str, str]] = []
+        if self._system_prompt:
+            request_messages.append({"role": "system", "content": self._system_prompt})
+        request_messages.extend({"role": m.role, "content": m.content} for m in self._messages)
+
+        response = client.chat.completions.create(model=self._model, messages=request_messages)
+        text = response.choices[0].message.content
+
+        self._messages.append(contracts.Message(role="assistant", content=text))
+        return contracts.AgentResult(text=text)
