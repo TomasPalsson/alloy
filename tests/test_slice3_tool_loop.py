@@ -13,16 +13,6 @@ from alloy._schema import derive, tool
 from alloy.contracts import ToolCall
 
 
-class _StubMessage:
-    def __init__(self, content: str | None) -> None:
-        self.content = content
-
-
-class _StubChoice:
-    def __init__(self, content: str | None) -> None:
-        self.message = _StubMessage(content)
-
-
 class _FunctionCallItem:
     """Mimics openai's ResponseFunctionToolCall: call_id, name, raw arguments string."""
 
@@ -35,11 +25,11 @@ class _FunctionCallItem:
 
 class _StubResponse:
     def __init__(self, content: str | None = None, output: list[Any] = []) -> None:  # noqa: B006
-        self.choices = [_StubChoice(content)]
+        self.output_text = content
         self.output = list(output)
 
 
-class _StubCompletions:
+class _StubResponses:
     def __init__(self, responses: list[_StubResponse]) -> None:
         self._responses = responses
         self.calls: list[dict[str, Any]] = []
@@ -49,15 +39,20 @@ class _StubCompletions:
         return self._responses[len(self.calls) - 1]
 
 
-class _StubChat:
-    def __init__(self, completions: _StubCompletions) -> None:
-        self.completions = completions
+class _StubConversation:
+    def __init__(self, id: str) -> None:
+        self.id = id
+
+
+class _StubConversations:
+    def create(self, **kwargs: Any) -> _StubConversation:
+        return _StubConversation("conv_1")
 
 
 class _StubClient:
     def __init__(self, responses: list[_StubResponse]) -> None:
-        self.completions = _StubCompletions(responses)
-        self.chat = _StubChat(self.completions)
+        self.responses = _StubResponses(responses)
+        self.conversations = _StubConversations()
 
 
 def test_b8_runs_matching_tool_and_submits_result_back() -> None:
@@ -83,10 +78,12 @@ def test_b8_runs_matching_tool_and_submits_result_back() -> None:
 
     assert seen_teams == ["data"]
     assert result.text == "alice is on call"
-    second_request_messages = client.completions.calls[1]["messages"]
+    second_call_input = client.responses.calls[1]["input"]
     assert any(
-        m["role"] == "tool" and m["content"] == json.dumps("alice")
-        for m in second_request_messages
+        item["type"] == "function_call_output"
+        and item["call_id"] == "call_1"
+        and item["output"] == json.dumps("alice")
+        for item in second_call_input
     )
 
 
@@ -161,7 +158,7 @@ def test_b27_direct_invocation_runs_with_zero_client_calls() -> None:
     value = agent.tool.get_oncall(team="data")
 
     assert value == "data-oncall"
-    assert client.completions.calls == []
+    assert client.responses.calls == []
 
 
 def test_b28_unknown_direct_attribute_raises_unknown_tool_error() -> None:

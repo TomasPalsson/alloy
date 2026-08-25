@@ -16,19 +16,10 @@ from alloy._schema import tool
 from alloy.contracts import AgentResult, ToolCall
 
 
-class _StubMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _StubChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _StubMessage(content)
-
-
 class _StubResponse:
     def __init__(self, content: str) -> None:
-        self.choices = [_StubChoice(content)]
+        self.output_text = content
+        self.output: list[Any] = []
 
 
 class _RawDeltaEvent:
@@ -80,7 +71,7 @@ class _StubStream:
             yield event
 
 
-class _StubStreamingCompletions:
+class _StubStreamingResponses:
     """`create()` returns a plain response normally, or a `_StubStream` when `stream=True`."""
 
     def __init__(self, turns: list[list[Any]] | None = None, refuse_stream: bool = False) -> None:
@@ -98,7 +89,7 @@ class _StubStreamingCompletions:
         return _StubStream(events)
 
 
-class _StubDelayedStreamCompletions:
+class _StubDelayedStreamResponses:
     """`create()` always returns the same (deliberately slow) stream."""
 
     def __init__(self, stream: _StubStream) -> None:
@@ -108,17 +99,23 @@ class _StubDelayedStreamCompletions:
         return self._stream if stream else _StubResponse("unused")
 
 
-class _StubChat:
-    def __init__(self, completions: Any) -> None:
-        self.completions = completions
+class _StubConversation:
+    def __init__(self, id: str) -> None:
+        self.id = id
+
+
+class _StubConversations:
+    def create(self, **kwargs: Any) -> _StubConversation:
+        return _StubConversation("conv_1")
 
 
 class _StubStreamingClient:
-    def __init__(self, completions: Any) -> None:
-        self.chat = _StubChat(completions)
+    def __init__(self, responses: Any) -> None:
+        self.responses = responses
+        self.conversations = _StubConversations()
 
 
-class _StubBlockingCompletions:
+class _StubBlockingResponses:
     """A non-streaming client used for invoke_async: create() blocks briefly."""
 
     def __init__(self, content: str, delay: float = 0.05) -> None:
@@ -132,7 +129,8 @@ class _StubBlockingCompletions:
 
 class _StubBlockingClient:
     def __init__(self, content: str, delay: float = 0.05) -> None:
-        self.chat = _StubChat(_StubBlockingCompletions(content, delay))
+        self.responses = _StubBlockingResponses(content, delay)
+        self.conversations = _StubConversations()
 
 
 async def test_b18_text_deltas_yield_data_events_that_concatenate_to_full_text() -> None:
@@ -143,7 +141,7 @@ async def test_b18_text_deltas_yield_data_events_that_concatenate_to_full_text()
         _RawTextDoneEvent("Hello, world"),
         _RawCompletedEvent(),
     ]
-    client = _StubStreamingClient(_StubStreamingCompletions(turns=[turn]))
+    client = _StubStreamingClient(_StubStreamingResponses(turns=[turn]))
     agent = Agent(model="gpt-4o", client=client)
 
     data_events = [e async for e in agent.stream_async("hi") if "data" in e]
@@ -154,7 +152,7 @@ async def test_b18_text_deltas_yield_data_events_that_concatenate_to_full_text()
 
 
 async def test_b19_client_refusing_streaming_raises_streaming_unsupported_error() -> None:
-    client = _StubStreamingClient(_StubStreamingCompletions(refuse_stream=True))
+    client = _StubStreamingClient(_StubStreamingResponses(refuse_stream=True))
     agent = Agent(model="gpt-4o", client=client)
 
     with pytest.raises(StreamingUnsupportedError, match="streaming"):
@@ -185,7 +183,7 @@ async def test_b20_tool_call_emits_current_tool_use_before_result_submitted() ->
         seen_teams.append(team)
         return "alice"
 
-    client = _StubStreamingClient(_StubStreamingCompletions(turns=[first_turn, second_turn]))
+    client = _StubStreamingClient(_StubStreamingResponses(turns=[first_turn, second_turn]))
     agent = Agent(model="gpt-4o", tools=[get_oncall], client=client)
 
     events = [e async for e in agent.stream_async("who is on call for data?")]
@@ -232,7 +230,7 @@ async def test_b26_abandoned_stream_terminates_worker_thread() -> None:
 
     many_events = [_RawDeltaEvent(str(i)) for i in range(50)]
     slow_stream = _StubStream(many_events, delay=0.02)
-    client = _StubStreamingClient(_StubDelayedStreamCompletions(slow_stream))
+    client = _StubStreamingClient(_StubDelayedStreamResponses(slow_stream))
     agent = Agent(model="gpt-4o", client=client)
 
     seen = 0

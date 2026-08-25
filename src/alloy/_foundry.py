@@ -70,22 +70,32 @@ class FoundryClient:
 
 
 def create_completion(client: Any, **create_kwargs: Any) -> Any:
-    """Return the coroutine for one non-streaming `client.chat.completions.create` call.
+    """Return the coroutine for one non-streaming `client.responses.create` call.
 
     A plain function, not `async def`: it hands back the `asyncio.to_thread` coroutine for
     the caller to await, keeping the package's only two `async def`s on `Agent` (see B30).
     """
-    return asyncio.to_thread(client.chat.completions.create, **create_kwargs)
+    return asyncio.to_thread(client.responses.create, **create_kwargs)
 
 
 def open_stream(client: Any, **create_kwargs: Any) -> Any:
-    """Start one streaming `client.chat.completions.create(stream=True)` call.
+    """Start one streaming `client.responses.create(stream=True)` call.
 
     Blocking, and run on the caller's thread — `Agent.stream_async` is the one that hops
     this onto a worker thread, so this stays a plain function (see B30). A client whose
     `create` does not accept `stream` raises `StreamingUnsupportedError` (see B19).
     """
     try:
-        return client.chat.completions.create(**create_kwargs, stream=True)
+        return client.responses.create(**create_kwargs, stream=True)
     except TypeError as exc:
         raise StreamingUnsupportedError(f"backend does not support streaming: {exc}") from exc
+
+
+def create_conversation(client: Any) -> str:
+    """Create a new Foundry conversation and return its id.
+
+    Blocking, like the other Foundry calls in this module. Called lazily from `_agent.py`
+    on an agent's first call, never from `__init__` (see B2) — the service, not a locally
+    invented uuid4, owns conversation identity in the Responses API.
+    """
+    return client.conversations.create().id

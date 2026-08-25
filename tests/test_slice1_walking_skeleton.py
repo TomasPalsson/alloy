@@ -20,22 +20,15 @@ def get_weather(city: str, country: str = "US") -> str:
     return "sunny"
 
 
-class _StubMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _StubChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _StubMessage(content)
-
-
 class _StubResponse:
+    """Mimics openai's `Response`: `.output_text` and an (unused here) `.output` list."""
+
     def __init__(self, content: str) -> None:
-        self.choices = [_StubChoice(content)]
+        self.output_text = content
+        self.output: list[Any] = []
 
 
-class _StubCompletions:
+class _StubResponses:
     def __init__(self, content: str) -> None:
         self._content = content
         self.call_count = 0
@@ -45,15 +38,20 @@ class _StubCompletions:
         return _StubResponse(self._content)
 
 
-class _StubChat:
-    def __init__(self, completions: _StubCompletions) -> None:
-        self.completions = completions
+class _StubConversation:
+    def __init__(self, id: str) -> None:
+        self.id = id
+
+
+class _StubConversations:
+    def create(self, **kwargs: Any) -> _StubConversation:
+        return _StubConversation("conv_1")
 
 
 class _StubClient:
     def __init__(self, content: str = "hello") -> None:
-        self.completions = _StubCompletions(content)
-        self.chat = _StubChat(self.completions)
+        self.responses = _StubResponses(content)
+        self.conversations = _StubConversations()
 
 
 def test_b1_derives_schema_from_type_hints() -> None:
@@ -77,7 +75,7 @@ def test_b2_construction_makes_zero_calls_against_client() -> None:
 
     Agent(model="gpt-4o", tools=[get_weather], client=client)
 
-    assert client.completions.call_count == 0
+    assert client.responses.call_count == 0
 
 
 def test_b3_plain_text_response_becomes_agent_result() -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import uuid
 import warnings
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any, cast
@@ -100,27 +99,40 @@ class Agent:
             self._ensure_version(client)
 
         # Conversation is created lazily on first call so __init__ stays call-free (see B2).
+        # It's the service's id, never a locally invented one — the Responses API's
+        # `conversation=` prepends that conversation's items automatically, so only the
+        # new turn's items (the prompt, then tool outputs) go in `input=` below.
         if self._conversation_id is None:
-            self._conversation_id = str(uuid.uuid4())
+            self._conversation_id = _foundry.create_conversation(client)
 
         self._messages.append(contracts.Message(role="user", content=prompt))
 
         tool_failures: list[Exception] = []
+        next_input: str | list[dict[str, str]] = prompt
         while True:
-            response = client.chat.completions.create(
+            response = client.responses.create(
                 model=self._model,
-                messages=self._request_messages(),
-                conversation_id=self._conversation_id,
+                input=next_input,
+                conversation=self._conversation_id,
+                instructions=self._system_prompt,
             )
             calls = extract_tool_calls(response)
             if not calls:
-                text = response.choices[0].message.content
+                text = response.output_text
                 break
 
+            next_input = []
             for result in run_calls(calls, self._tool_map):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
+                next_input.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": result.output,
+                    }
+                )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
@@ -134,22 +146,32 @@ class Agent:
         client = self._prepare_call(prompt)
 
         tool_failures: list[Exception] = []
+        next_input: str | list[dict[str, str]] = prompt
         while True:
             response = await _foundry.create_completion(
                 client,
                 model=self._model,
-                messages=self._request_messages(),
-                conversation_id=self._conversation_id,
+                input=next_input,
+                conversation=self._conversation_id,
+                instructions=self._system_prompt,
             )
             calls = extract_tool_calls(response)
             if not calls:
-                text = response.choices[0].message.content
+                text = response.output_text
                 break
 
+            next_input = []
             for result in run_calls(calls, self._tool_map):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
+                next_input.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": result.output,
+                    }
+                )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
@@ -170,6 +192,7 @@ class Agent:
         client = self._prepare_call(prompt)
 
         tool_failures: list[Exception] = []
+        next_input: str | list[dict[str, str]] = prompt
         while True:
             text_parts: list[str] = []
             final_text: str | None = None
@@ -180,8 +203,9 @@ class Agent:
             stop_requested = threading.Event()
             create_kwargs = {
                 "model": self._model,
-                "messages": self._request_messages(),
-                "conversation_id": self._conversation_id,
+                "input": next_input,
+                "conversation": self._conversation_id,
+                "instructions": self._system_prompt,
             }
 
             def _pump(
@@ -240,10 +264,18 @@ class Agent:
                 text = final_text if final_text is not None else "".join(text_parts)
                 break
 
+            next_input = []
             for result in run_calls(pending_calls, self._tool_map):
                 if result.failure is not None:
                     tool_failures.append(result.failure)
                 self._messages.append(contracts.Message(role="tool", content=result.output))
+                next_input.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": result.call_id,
+                        "output": result.output,
+                    }
+                )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         yield {"result": contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))}
@@ -264,18 +296,10 @@ class Agent:
             self._ensure_version(client)
 
         if self._conversation_id is None:
-            self._conversation_id = str(uuid.uuid4())
+            self._conversation_id = _foundry.create_conversation(client)
 
         self._messages.append(contracts.Message(role="user", content=prompt))
         return client
-
-    def _request_messages(self) -> list[dict[str, str]]:
-        """Build the request payload from the system prompt and conversation so far."""
-        request_messages: list[dict[str, str]] = []
-        if self._system_prompt:
-            request_messages.append({"role": "system", "content": self._system_prompt})
-        request_messages.extend({"role": m.role, "content": m.content} for m in self._messages)
-        return request_messages
 
     def _ensure_version(self, client: Any) -> None:
         """Create a backend version for the current config, unless one already matches.

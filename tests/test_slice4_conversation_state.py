@@ -8,22 +8,13 @@ from alloy import Agent
 from alloy.contracts import Message
 
 
-class _StubMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _StubChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _StubMessage(content)
-
-
 class _StubResponse:
     def __init__(self, content: str) -> None:
-        self.choices = [_StubChoice(content)]
+        self.output_text = content
+        self.output: list[Any] = []
 
 
-class _StubCompletions:
+class _StubResponses:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
@@ -32,15 +23,20 @@ class _StubCompletions:
         return _StubResponse(f"response-{len(self.calls)}")
 
 
-class _StubChat:
-    def __init__(self, completions: _StubCompletions) -> None:
-        self.completions = completions
+class _StubConversation:
+    def __init__(self, id: str) -> None:
+        self.id = id
+
+
+class _StubConversations:
+    def create(self, **kwargs: Any) -> _StubConversation:
+        return _StubConversation("conv_1")
 
 
 class _StubClient:
     def __init__(self) -> None:
-        self.completions = _StubCompletions()
-        self.chat = _StubChat(self.completions)
+        self.responses = _StubResponses()
+        self.conversations = _StubConversations()
 
 
 def test_b12_second_call_passes_same_conversation_id_to_client() -> None:
@@ -50,8 +46,8 @@ def test_b12_second_call_passes_same_conversation_id_to_client() -> None:
     agent("first prompt")
     agent("second prompt")
 
-    first_conversation_id = client.completions.calls[0]["conversation_id"]
-    second_conversation_id = client.completions.calls[1]["conversation_id"]
+    first_conversation_id = client.responses.calls[0]["conversation"]
+    second_conversation_id = client.responses.calls[1]["conversation"]
 
     assert first_conversation_id is not None
     assert first_conversation_id == second_conversation_id
