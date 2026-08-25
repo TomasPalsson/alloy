@@ -146,6 +146,11 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 
 **Edge cases**:
 - **Model calls two tools in one turn**: each gets its own `toolCallId` and its own complete `START`/`ARGS`/`END`/`RESULT` group. Groups may not interleave their `START`/`END` brackets.
+- **Model emits text and then a tool call in one turn**: the text message is closed before the tool
+  call opens. The reference client's validator is strictly single-threaded — while a tool call is
+  open it rejects every other event, a new `TEXT_MESSAGE_START` included — so an interleaved
+  stream passes alloy's own checks and is still refused by a real client. Nothing in
+  `stream_async` prevents a turn from carrying both, so this is enforced, not assumed.
 - **Model produces no text at all**: no `TEXT_MESSAGE_*` events are emitted; `RUN_STARTED` and `RUN_FINISHED` still bracket the run.
 - **Tool loop hits the 10-turn cap**: `_MAX_TOOL_TURNS` raises; this surfaces as `RUN_ERROR`, not a silent truncation.
 - **Client disconnects mid-stream**: the server stops writing; no further events are required.
@@ -165,6 +170,7 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 | AC-09 | A completed tool call | The tool has run | `TOOL_CALL_RESULT` is emitted after that call's `TOOL_CALL_END`, carrying the same `toolCallId` and a non-empty `messageId` | MUST |
 | AC-10 | A tool that raises | The failure is caught | `TOOL_CALL_RESULT` is still emitted, its content names the failure, and the run is not aborted | MUST |
 | AC-11 | Two tool calls in one turn | Both are translated | Each has a distinct `toolCallId`, and neither group's `START`/`END` bracket contains the other's | MUST |
+| AC-42 | A turn where the model emits text AND then requests a tool | Both are translated | `TEXT_MESSAGE_END` is emitted BEFORE that turn's `TOOL_CALL_START`. At no point are a text message and a tool call open at the same time | MUST |
 | AC-12 | A run producing no text | The run completes | No `TEXT_MESSAGE_*` event is emitted, and `RUN_STARTED`/`RUN_FINISHED` still bracket the run | MUST |
 | AC-13 | Azure sends argument deltas | Args are translated | More than one `TOOL_CALL_ARGS` is emitted for that call, and concatenating their `delta` fields yields the tool's complete argument JSON | MUST |
 
@@ -358,6 +364,10 @@ so alloy maps one onto the other rather than storing transcripts itself.
   conversation, and interleaving is Azure's behaviour, not alloy's. Named so it is a known limit
   rather than a surprise.
 - **`threadId` the client never used before**: indistinguishable from run 1. Nothing special happens.
+- **Empty or whitespace-only `threadId`**: rejected with 422. Taken directly from the operator's own
+  production catalogue (`agui-strands/references/anti-patterns.md`), where a session key that
+  collapsed to a constant put every user in one shared session. A blank thread id here would do
+  the same, so it is a rejection rather than a default.
 
 **Acceptance criteria**:
 
@@ -368,6 +378,7 @@ so alloy maps one onto the other rather than storing transcripts itself.
 | AC-38 | Two different `threadId` values | Both run | They resolve to two different conversation ids, and neither can read the other's | MUST |
 | AC-39 | The thread map holds its maximum entries | One more unseen `threadId` arrives | The least-recently-used entry is evicted, the new run succeeds, and no error surfaces | MUST |
 | AC-40 | A `threadId` mapped to a conversation the backend rejects | The run executes | The mapping is dropped, a fresh conversation is created, the run completes, and `RUN_ERROR` is NOT emitted | MUST |
+| AC-41 | Two runs, each with `threadId` set to the empty string | Both execute | They do NOT share a conversation. An empty or whitespace-only `threadId` is rejected with 422 rather than collapsing into one shared thread | MUST |
 
 ---
 
@@ -401,6 +412,7 @@ so alloy maps one onto the other rather than storing transcripts itself.
 | FR-22 | System | MUST let an `Agent` be constructed against an existing conversation id rather than always creating a new one | MUST | AC-37 |
 | FR-23 | System | MUST bound the thread map at 100 entries and evict least-recently-used, without surfacing an error | MUST | AC-39 |
 | FR-24 | System | MUST recover from a stale conversation id by creating a fresh one and completing the run normally | MUST | AC-40 |
+| FR-25 | System | MUST reject an empty or whitespace-only `threadId` rather than letting every such caller share one conversation | MUST | AC-41 |
 
 ### 4.2 Data Requirements
 
@@ -530,6 +542,15 @@ conversation will interleave.
 
 **Growth assumption**: None. Re-evaluate only if someone puts this behind a real ASGI server, at which point the transport-agnostic iterator is what makes that swap cheap.
 
+**Deployment ceiling on the thread map**: `ThreadStore` is process-local. On a single long-lived
+server that is correct and sufficient. On any multi-instance or scale-to-zero host — Lambda,
+Bedrock AgentCore, Container Apps, more than one replica — a caller's second run can land on an
+instance that never saw the first, and the agent silently forgets. The operator has hit exactly
+this in production (`agui-strands` anti-patterns, "agent forgets everything after the first
+message"). The upgrade path is to swap `ThreadStore` for a shared store (Redis, or a Foundry
+conversation id echoed back to the client and resent); the interface is two methods so the swap
+is contained. This is a named limitation, not a defect, and it belongs in the README.
+
 **Bottleneck hypothesis**: The per-request `Agent` construction (a `list_versions` round trip per request), inherited from `serve.py`. Not introduced here and not fixed here.
 
 ### 5.6 Observability
@@ -565,7 +586,7 @@ conversation will interleave.
 
 ### 6.1 Launch Criteria (go/no-go)
 
-- [ ] Every `MUST` acceptance criterion (AC-01 to AC-26, AC-28 to AC-40) passes.
+- [ ] Every `MUST` acceptance criterion (AC-01 to AC-26, AC-28 to AC-42) passes.
 - [ ] `uv run pytest`, `uv run ruff check .`, and `uv run pyright` all exit zero.
 - [ ] A live run against real Azure produces a stream the conformance checker validates.
 - [ ] The verification page renders a live tool-using run in a real browser, evidence captured.
@@ -710,3 +731,4 @@ Two consequences for the build:
 | Pydantic AI AG-UI integration | Precedent for optional-extra packaging and the client-trust warnings | https://pydantic.dev/docs/ai/integrations/ui/ag-ui/ |
 | `.specs/002-hooks-and-serve/spec.md` | The hooks and server this builds on | `.specs/002-hooks-and-serve/spec.md` |
 | alloy README | Current public surface | `README.md` |
+| `agui-strands` skill (operator's own) | Production AG-UI failure modes on a Strands/AgentCore stack — amnesia, spinner-forever, blank bubble | `~/.claude/skills/agui-strands/references/anti-patterns.md` |

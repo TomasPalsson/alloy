@@ -83,7 +83,10 @@ do not add a new mechanism. **Anything not listed is a bug.**
 - `src/alloy/_schema.py` · layer 1 · **NOT touched by this build** · **must never import `ag_ui`** · seam: **schema derivation**
 - `src/alloy/_versions.py` · layer 1 · **NOT touched by this build** · **must never import `ag_ui`** · seam: **version fingerprint**
 
-Four of the nine modules above are marked NOT touched. That is a closed world, not an omission:
+- `examples/hooks.py` · layer 4 · **NOT touched by this build** · seam: **hook demo**
+- `examples/oncall.py` · layer 4 · **NOT touched by this build** · seam: **agent demo**
+
+Six of the eleven modules above are marked NOT touched. That is a closed world, not an omission:
 an edit to any of them is a defect, and slice 5 in particular must resist "while I am in
 `_loop.py` anyway" changes to `_foundry.py`.
 
@@ -96,7 +99,7 @@ A test asserts this by AST over `src/alloy/`.
 |---|---|---|---|
 | `Agent` | `examples/serve.py:_build_agent` | argument | `run_stream(agent, run_input)` |
 | `_RunState` | `run_stream`, once per call | closure-local, never global | its own helpers |
-| `EventEncoder` | `examples/serve.py`, from the request's `Accept` header | argument | the SSE writer only |
+| `EventEncoder` | `examples/serve.py`, passed the request's `Accept` header | argument | the SSE writer only |
 | `state: dict` | `seed_state(run_input)` | field on `_RunState` | patch recorder |
 | tool-result signal | `run_stream` registers on `agent.hooks`, and removes it in a `finally` | `add_callback` / `remove_callback` | `_RunState` |
 | `ThreadStore` | `examples/serve.py`, ONCE at module scope | closure into the handler factory | the `POST /` path, before the `Agent` is built |
@@ -106,6 +109,11 @@ A test asserts this by AST over `src/alloy/`.
 already built against the right conversation, and stays a pure translation of one run. The thread
 lookup therefore happens in the CALLER, before `run_stream` is entered — that ordering is forced,
 not stylistic: an agent's conversation is fixed at construction.
+
+`ThreadStore` carries a `ponytail:` comment naming its ceiling: process-local, so a multi-instance
+deployment loses continuity silently — swap in a shared store, the interface is two methods. An
+empty or whitespace-only `thread_id` MUST be rejected before it reaches the store, never defaulted:
+a session key that collapses to a constant puts every caller in one conversation.
 
 `ThreadStore` is DEFINED in `agui.py` (layer 3) so a user writing their own server gets the
 mechanism, but INSTANTIATED in `examples/serve.py` (layer 4) because the lifetime of a session map
@@ -117,6 +125,11 @@ Config keys: `AZURE_AI_PROJECT_ENDPOINT` only, already read by `_foundry.resolve
 environment variable. Only the orchestrator may add a dependency.
 
 ## 6. Deliberately duplicated — do NOT consolidate
+
+- **`EventEncoder`'s `accept` argument.** The Python encoder ACCEPTS an `accept` parameter and
+  ignores it — it always emits SSE (upstream issue #2094). Pass the header anyway and take the
+  content type from `get_content_type()`, so the day upstream wires negotiation up alloy gets it
+  free. Do NOT hardcode `"text/event-stream"`, and do NOT write your own negotiation.
 
 - **SSE framing.** `examples/serve.py` already has `_sse_frame`. The AG-UI route uses
   `EventEncoder.encode` instead. Two framers, deliberately: the encoder negotiates on `Accept` and
@@ -170,6 +183,15 @@ environment variable. Only the orchestrator may add a dependency.
    `try` is the only feature detection**. *Makes hard:* partial support without the SDK —
    `src/alloy/agui.py`, `pyproject.toml`.
 
+6. In the context of **thread continuity**, facing **`Agent.__init__` hardcoding
+   `self._conversation_id = None` so every agent always creates a fresh conversation**, we chose
+   **one keyword-only `conversation_id: str | None = None` parameter that seeds that field** and
+   rejected **a public setter or mutating `_conversation_id` from outside**, to achieve **an agent
+   whose conversation is fixed at construction, which is what makes `run_stream` safe to keep
+   pure**, accepting that **a caller can now pass a conversation id the backend will reject, so
+   the stale-id recovery row in §9 is mandatory, not optional**.
+   *Makes hard:* changing conversation ownership — `src/alloy/_agent.py`, `src/alloy/_foundry.py`.
+
 <!-- SIZE: large only -->
 ## 8. Hidden decisions + churn
 
@@ -177,10 +199,11 @@ environment variable. Only the orchestrator may add a dependency.
 |---|---|---|
 | `tool_call_id` is alloy's `call_id`, never minted | `agui.py` | **STABLE** — slices 4, 5, 7 all depend on it |
 | one `message_id` per assistant message, minted here | `agui.py` | **STABLE** — slices 3, 7 depend on it |
-| the shape of `state` (`messages`/`active_tool_calls`/`completed_tool_calls`/`tool_failures`) | `agui.py` | **CHURNING** — no frontend has consumed it yet |
+| the shape of `state` (`messages`/`activeToolCalls`/`completedToolCalls`/`toolFailures`) | `agui.py` | **CHURNING** — no frontend has consumed it yet |
 | the `Accept`-derived content type | `serve.py` | STABLE |
 | which Azure raw types are translated | `agui.py` | **CHURNING** — Appendix D is one model's behaviour, not a contract |
 | `ThreadStore`'s 100-entry cap and LRU policy | `agui.py` | **PROVISIONAL** — no measurement justifies 100; it exists so the map is bounded rather than because 100 is right |
+| that `ThreadStore` is process-local | `agui.py` | **PROVISIONAL** — correct for one long-lived process, silently wrong on any multi-instance host; see spec §5.5 |
 | that a thread maps to exactly ONE backend conversation | `agui.py` | **STABLE** — slices 7 and 8 both depend on it |
 
 A CHURNING `state` shape sits inside a STABLE `_RunState`. That is deliberate: the container is
@@ -188,22 +211,33 @@ fixed so slices can write against it; the dict's keys are expected to move after
 
 ## 9. State machines
 
-The run's bracket state IS the conformance contract. `_RunState.phase` is a 4-value field, so an
-exhaustive `match` in `agui.py` makes a missing pair a type error.
+The run's bracket state IS the conformance contract. `_RunState.phase` is a **5**-value field —
+`NOT_STARTED`, `OPEN`, `TEXT_OPEN`, `FINISHED`, `ERRORED` — so an exhaustive `match` in `agui.py`
+makes a missing pair a type error. Declare the `Literal` with all five or the exhaustiveness claim
+is false.
+
+**The single-open rule.** The reference client's validator (`verifyEvents` in `@ag-ui/client`) is
+strictly single-threaded: while a tool call is open, it rejects ANY other event, a new
+`TEXT_MESSAGE_START` included. So a stream that interleaves text and tool calls is legal-looking
+and still refused by real clients. `run_stream` therefore CLOSES an open text message before
+emitting `TOOL_CALL_START`, and never opens a text message while a tool call is open. This is why
+the table below has no `TEXT_OPEN` row for any tool event — not an omission, a forced ordering.
 
 | current | event | next | guard | side effect |
 |---|---|---|---|---|
-| `NOT_STARTED` | run begins | `OPEN` | — | emit `RUN_STARTED`, then `STATE_SNAPSHOT` |
+| `NOT_STARTED` | run begins | `OPEN` | — | emit `RUN_STARTED`, then `STATE_SNAPSHOT` of `seed_state(...)`. This is the ONLY state write that does not go through `apply` — it is construction, not mutation |
 | `OPEN` | first text delta | `TEXT_OPEN` | no text message open | mint `message_id`, emit `TEXT_MESSAGE_START` |
 | `TEXT_OPEN` | text delta | `TEXT_OPEN` | — | emit `TEXT_MESSAGE_CONTENT` |
 | `TEXT_OPEN` | text done | `OPEN` | — | emit `TEXT_MESSAGE_END` |
-| `OPEN` | tool call seen | `OPEN` | — | emit `TOOL_CALL_START`; record in `active_tool_calls` |
+| `TEXT_OPEN` | tool call seen | `OPEN` | — | emit `TEXT_MESSAGE_END` FIRST (single-open rule), then `TOOL_CALL_START`, then `_RunState.apply("add", "/activeToolCalls/<id>", ...)` |
+| `OPEN` | tool call seen | `OPEN` | — | emit `TOOL_CALL_START`, then `_RunState.apply("add", "/activeToolCalls/<id>", ...)` |
 | `OPEN` | tool arg delta | `OPEN` | that `tool_call_id` is active | emit `TOOL_CALL_ARGS` |
 | `OPEN` | tool args done | `OPEN` | that `tool_call_id` is active | emit `TOOL_CALL_END` |
-| `OPEN` | hook fires | `OPEN` | — | emit `TOOL_CALL_RESULT`, then `STATE_DELTA` |
+| `OPEN` | hook fires | `OPEN` | — | emit `TOOL_CALL_RESULT`, then `_RunState.apply("remove", "/activeToolCalls/<id>")` + `apply("add", "/completedToolCalls/-", ...)` as ONE `STATE_DELTA` |
 | `TEXT_OPEN` | run ends | `FINISHED` | — | emit `TEXT_MESSAGE_END` FIRST, then `RUN_FINISHED` |
 | `OPEN` | run ends | `FINISHED` | — | emit `RUN_FINISHED` |
-| `OPEN` / `TEXT_OPEN` | exception | `ERRORED` | — | emit `RUN_ERROR`; emit nothing further |
+| `OPEN` / `TEXT_OPEN` | backend rejects a STALE conversation id | `OPEN` | the id came from `ThreadStore` | drop the mapping, build a fresh conversation, retry ONCE. Do NOT emit `RUN_ERROR` — spec AC-40 |
+| `OPEN` / `TEXT_OPEN` | any other exception | `ERRORED` | — | close an open text message if any, emit `RUN_ERROR`, emit nothing further |
 | `FINISHED` / `ERRORED` | anything | — | — | **illegal; absent rows are the point** |
 
 The `TEXT_OPEN → run ends` row is the one a naive implementation gets wrong: it closes the text
