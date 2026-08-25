@@ -16,9 +16,13 @@ def extract_tool_calls(response: Any) -> list[ToolCall]:
     (the shape observed for openai's ResponseFunctionToolCall). A response with no
     such list — e.g. a plain-text completion — yields no calls.
     """
-    items = getattr(response, "output", None) or []
+    items: list[Any] = getattr(response, "output", None) or []
     return [
-        ToolCall(call_id=item.call_id, name=item.name, arguments=decode_arguments(item.arguments))
+        ToolCall(
+            call_id=str(item.call_id),
+            name=str(item.name),
+            arguments=decode_arguments(str(item.arguments)),
+        )
         for item in items
         if getattr(item, "type", None) == "function_call"
     ]
@@ -60,4 +64,5 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
 
 def _failure(call: ToolCall, error: Exception) -> ToolResult:
     """Build the ToolResult for a call that never ran its tool."""
-    return ToolResult(call_id=call.call_id, output=json.dumps({"error": str(error)}), failure=error)
+    output = json.dumps({"error": str(error)})
+    return ToolResult(call_id=call.call_id, output=output, failure=error)

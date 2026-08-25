@@ -124,6 +124,12 @@ CALLS      `extract_tool_calls(response: Any) -> list[ToolCall]` · `decode_argu
 DUPLICATE  A tool's exception is RETURNED on `ToolResult.failure`, never raised. No retry loop.
            Arguments not matching the derived schema raise `ToolArgumentError` BEFORE the tool runs
            (Journey 1 edge case). Do not reuse `_schema`'s signature validator for this.
+VERIFIED   openai 3.3.1 shapes (observed in the installed package, not inferred):
+             model emits `ResponseFunctionToolCall`: `type="function_call"`, `call_id: str`,
+               `name: str`, `arguments: str` (RAW JSON STRING — you must json.loads it yourself)
+             caller submits `{"type": "function_call_output", "call_id": ..., "output": str}`
+TRAP       Round-trip `call_id`, NOT `id`. Both fields exist; `id` is the item's own identity and
+           using it silently breaks correlation.
 THE FIVE   (as Slice 1)
 
 ## Contract for this slice — Slice 4: Conversation state and history
@@ -161,6 +167,16 @@ DUPLICATE  The sync backend is reached through `asyncio.to_thread` in `_foundry.
            never calls `to_thread` itself. `stream_async` pumps the sync iterator on a worker thread
            into an `asyncio.Queue`; the queue is drained and the thread joined on cancellation.
            NEVER emulate streaming by chunking a complete response — raise instead (Decision 4).
+VERIFIED   openai 3.3.1 Responses streaming events (observed, not inferred):
+             `response.output_text.delta`            -> `.delta: str`   (text chunk)
+             `response.output_text.done`             -> `.text: str`    (full finalized text)
+             `response.function_call_arguments.delta`-> `.delta: str`   (partial JSON)
+             `response.function_call_arguments.done` -> `.arguments: str`
+             `response.output_item.added` / `.done`  -> `.item`         (a ResponseFunctionToolCall)
+             `response.completed` / `response.incomplete`
+TRAP       The error path is DUAL. An SSE `error` frame is raised as an `openai.APIError` EXCEPTION
+           from inside `Stream.__stream__()`, so it may never arrive as an `event.type == "error"`.
+           Handle BOTH. Missing this is a silent hang or an unhandled crash mid-stream.
 THE FIVE   (as Slice 1)
 
 ## Contract for this slice — Slice 7: Foundry adapter, auth, example
@@ -171,5 +187,11 @@ MODULE     `src/alloy/_foundry.py` layer 1 · may import: contracts, `azure.*`, 
            `src/alloy/__init__.py` layer 3 · re-export `BackendAuthError` · seam: public API
 CALLS      `FoundryClient.__init__(self, *, endpoint: str | None = None, credential: object | None = None) -> None`
            `resolve_endpoint(explicit: str | None) -> str`
-DUPLICATE  This is the ONLY module that may import `azure.*` or `openai`. `AIProjectClient` must be constructed with `allow_preview=True` or `get_openai_client(agent_name=...)` raises `ValueError`. Map SDK auth exceptions to `BackendAuthError` here and nowhere else; never let a token reach the message.
+DUPLICATE  This is the ONLY module that may import `azure.*` or `openai`. Map SDK auth exceptions to
+           `BackendAuthError` here and nowhere else; never let a token reach the message.
+VERIFIED   `allow_preview=True` IS still passed, but NOT for the reason the SDK docstring gives.
+           The docstring claims `get_openai_client(agent_name=...)` raises `ValueError` without it;
+           reading 2.5.0's source shows `allow_preview` is never read and no such raise exists.
+           Enforcement is SERVER-side: a 403 carrying error code `preview_feature_required`.
+           So handle that as an `AlloyError`, and never write a client-side ValueError guard.
 THE FIVE   (as Slice 1)

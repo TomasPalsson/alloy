@@ -18,7 +18,10 @@ _TOOL_SPEC_ATTRIBUTE = "__alloy_tool_spec__"
 
 
 class _ToolNamespace:
-    """Attribute access over an agent's own tools: `agent.tool.<name>(**kwargs)` runs it directly."""
+    """Attribute access over an agent's own tools.
+
+    `agent.tool.<name>(**kwargs)` runs it directly, with no model call.
+    """
 
     def __init__(self, tool_map: Mapping[str, contracts.ToolSpec]) -> None:
         self._tool_map = tool_map
