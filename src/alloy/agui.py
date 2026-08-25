@@ -19,8 +19,11 @@ Ordering rules a produced stream must obey (enforced by `check_conformance`):
    `tool_call_id`.
 7. `TOOL_CALL_RESULT` must follow that call's `TOOL_CALL_END`.
 8. The single-open rule: a text message and a tool call are never open at the same time.
+9. `STATE_DELTA` must be preceded by a `STATE_SNAPSHOT`.
+10. At most one `STATE_SNAPSHOT` per run.
+11. No text message or tool call may still be open at the terminal event.
 
-Rules 1-7 come from the AG-UI protocol's own ordering and correlation rules:
+Rules 1-7 and 9-11 come from the AG-UI protocol's own ordering and correlation rules:
 https://docs.ag-ui.com/concepts/events. Rule 8 does not — it comes from the reference
 client's actual behaviour: `verifyEvents` in `@ag-ui/client` is strictly single-threaded
 and rejects any other event while a tool call is open, so a stream that interleaves text
@@ -96,7 +99,7 @@ _TERMINAL_TYPES = frozenset((ag_ui_core.EventType.RUN_FINISHED, ag_ui_core.Event
 def check_conformance(events: Sequence[ag_ui_core.BaseEvent]) -> None:
     """Assert `events` obeys AG-UI ordering rules; raise on the first violation.
 
-    See the module docstring for the eight rules this enforces.
+    See the module docstring for the eleven rules this enforces.
 
     Args:
         events: The full ordered event sequence produced by one run.
@@ -105,8 +108,7 @@ def check_conformance(events: Sequence[ag_ui_core.BaseEvent]) -> None:
         raise AssertionError("rule 1 violated: RUN_STARTED must be the first event, got none")
     if events[0].type != ag_ui_core.EventType.RUN_STARTED:
         raise AssertionError(
-            f"rule 1 violated: RUN_STARTED must be the first event, "
-            f"got {events[0].type.value}"
+            f"rule 1 violated: RUN_STARTED must be the first event, got {events[0].type.value}"
         )
 
     terminal_type: ag_ui_core.EventType | None = None
@@ -193,27 +195,27 @@ def check_conformance(events: Sequence[ag_ui_core.BaseEvent]) -> None:
         elif isinstance(event, ag_ui_core.StateSnapshotEvent):
             if seen_state_snapshot:
                 raise AssertionError(
-                    f"state rule violated: at most one STATE_SNAPSHOT is allowed per "
-                    f"run, got a second {et.value}"
+                    f"rule 10 violated: at most one STATE_SNAPSHOT is allowed per run, "
+                    f"got a second {et.value}"
                 )
             seen_state_snapshot = True
         elif isinstance(event, ag_ui_core.StateDeltaEvent) and not seen_state_snapshot:
             raise AssertionError(
-                f"state rule violated: STATE_DELTA must be preceded by a "
-                f"STATE_SNAPSHOT, got {et.value}"
+                f"rule 9 violated: STATE_DELTA must be preceded by a STATE_SNAPSHOT, got {et.value}"
             )
 
         if et in _TERMINAL_TYPES:
             if open_message_id is not None:
                 raise AssertionError(
-                    f"bracket rule violated: message_id={open_message_id!r} is still "
-                    f"open at the terminal event, got {et.value}"
+                    f"rule 11 violated: TEXT_MESSAGE_START for "
+                    f"message_id={open_message_id!r} was never closed with "
+                    f"TEXT_MESSAGE_END before the terminal event {et.value}"
                 )
             if open_tool_call_ids:
                 raise AssertionError(
-                    f"bracket rule violated: tool_call_id(s) "
-                    f"{sorted(open_tool_call_ids)} still open at the terminal event, "
-                    f"got {et.value}"
+                    f"rule 11 violated: TOOL_CALL_START for tool_call_id(s) "
+                    f"{sorted(open_tool_call_ids)} was never closed with "
+                    f"TOOL_CALL_END before the terminal event {et.value}"
                 )
             terminal_type = et
 
