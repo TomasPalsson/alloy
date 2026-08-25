@@ -51,6 +51,7 @@ __all__ = [
     "capabilities",
     "check_conformance",
     "json_safe",
+    "latest_user_prompt",
     "parse_run_input",
     "run_stream",
     "seed_state",
@@ -231,6 +232,21 @@ def capabilities() -> ag_ui_core.AgentCapabilities:
 
     Returns:
         The declared agent capabilities.
+    """
+    raise NotImplementedError
+
+
+def latest_user_prompt(run_input: ag_ui_core.RunAgentInput) -> str:
+    """Return the newest `role: "user"` message's text from `run_input`.
+
+    Args:
+        run_input: The parsed run input.
+
+    Returns:
+        The newest user message's text.
+
+    Raises:
+        ValueError: `run_input.messages` holds no user message.
     """
     raise NotImplementedError
 
