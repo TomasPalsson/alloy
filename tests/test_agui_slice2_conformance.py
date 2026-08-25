@@ -247,6 +247,55 @@ def test_b9_rule8_tool_call_open_rejects_text_message_start() -> None:
     assert "TEXT_MESSAGE_START" in str(exc_info.value)
 
 
+def test_b9_rule9_state_delta_before_any_snapshot_is_rejected() -> None:
+    events: list[ag_ui_core.BaseEvent] = [
+        _started(),
+        ag_ui_core.StateDeltaEvent(delta=[{"op": "add", "path": "/x", "value": 1}]),
+        _finished(),
+    ]
+
+    with pytest.raises(AssertionError, match=r"(?i)\brule\s*9\b") as exc_info:
+        agui.check_conformance(events)
+    assert "STATE_DELTA" in str(exc_info.value)
+
+
+def test_b9_rule10_second_state_snapshot_is_rejected() -> None:
+    events: list[ag_ui_core.BaseEvent] = [
+        _started(),
+        ag_ui_core.StateSnapshotEvent(snapshot={}),
+        ag_ui_core.StateSnapshotEvent(snapshot={}),
+        _finished(),
+    ]
+
+    with pytest.raises(AssertionError, match=r"(?i)\brule\s*10\b") as exc_info:
+        agui.check_conformance(events)
+    assert "STATE_SNAPSHOT" in str(exc_info.value)
+
+
+def test_b9_rule11_unclosed_text_message_at_terminal_is_rejected() -> None:
+    events: list[ag_ui_core.BaseEvent] = [
+        _started(),
+        ag_ui_core.TextMessageStartEvent(message_id="m1"),
+        _finished(),
+    ]
+
+    with pytest.raises(AssertionError, match=r"(?i)\brule\s*11\b") as exc_info:
+        agui.check_conformance(events)
+    assert "TEXT_MESSAGE_START" in str(exc_info.value)
+
+
+def test_b9_rule11_unclosed_tool_call_at_terminal_is_rejected() -> None:
+    events: list[ag_ui_core.BaseEvent] = [
+        _started(),
+        ag_ui_core.ToolCallStartEvent(tool_call_id="tc1", tool_call_name="get_weather"),
+        _finished(),
+    ]
+
+    with pytest.raises(AssertionError, match=r"(?i)\brule\s*11\b") as exc_info:
+        agui.check_conformance(events)
+    assert "TOOL_CALL_START" in str(exc_info.value)
+
+
 # --- B10: module docstring states ordering rules and cites the protocol ----------------
 
 
