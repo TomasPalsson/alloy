@@ -316,8 +316,13 @@ class Agent:
         Args:
             prompt: The user prompt about to be sent.
         """
-        self._messages.append(contracts.Message(role="user", content=prompt))
+        # Emit BEFORE recording: a hook that raises then leaves no orphaned user message
+        # in `self._messages` with no assistant reply after it, so a caller that catches
+        # the hook's exception and retries does not accumulate phantom turns. It also
+        # means the hook sees history as it was, without the prompt it is being asked
+        # to vet already appended to it.
         self._hooks.emit(BeforeInvocationEvent(agent=self, prompt=prompt))
+        self._messages.append(contracts.Message(role="user", content=prompt))
 
     def _prepare_call(self, prompt: str) -> Any:
         """Backend setup for `__call__`/`invoke_async`/`stream_async`.

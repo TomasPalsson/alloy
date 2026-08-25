@@ -339,3 +339,30 @@ async def test_ac17_all_three_call_paths_fire_the_same_event_sequence() -> None:
     assert sync_log == expected
     assert async_log == expected
     assert stream_log == expected
+
+
+def test_raising_before_hook_leaves_no_orphaned_user_message() -> None:
+    """A hook that rejects a call must not leave a phantom turn in the history.
+
+    `_begin` emits before it records the prompt. If it recorded first, a caller that
+    catches the hook's exception and retries would accumulate a user message with no
+    assistant reply after it for every rejected attempt, and `agent.messages` would
+    describe turns that never happened.
+    """
+
+    class _Rejecting(HookProvider):
+        def register_hooks(self, registry: HookRegistry) -> None:
+            def _reject(event: BeforeInvocationEvent) -> None:
+                raise RuntimeError("rejected by policy")
+
+            registry.add_callback(BeforeInvocationEvent, _reject)
+
+    client = _StubClient([_StubResponse(content="hi")])
+    agent = Agent(model="gpt-4o", client=client, hooks=[_Rejecting()])
+
+    for _attempt in range(3):
+        with pytest.raises(RuntimeError, match="rejected by policy"):
+            agent("please do the thing")
+
+    assert agent.messages == []
+    assert client.responses.calls == []
