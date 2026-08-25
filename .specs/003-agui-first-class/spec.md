@@ -179,6 +179,8 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 | AC-09 | A completed tool call | The tool has run | `TOOL_CALL_RESULT` is emitted after that call's `TOOL_CALL_END`, carrying the same `toolCallId` and a non-empty `messageId` | MUST |
 | AC-10 | A tool that raises | The failure is caught | `TOOL_CALL_RESULT` is still emitted, its content names the failure, and the run is not aborted | MUST |
 | AC-11 | Two tool calls in one turn | Both are translated | Each has a distinct `toolCallId`, and neither group's `START`/`END` bracket contains the other's | MUST |
+| AC-43 | `RunAgentInput.messages` ends with a `role: "user"` message | The run executes | That message's exact text is what reaches `Agent.stream_async`, not an empty string and not a concatenation of the history | MUST |
+| AC-44 | `RunAgentInput.messages` contains no `role: "user"` message at all | `POST /` is called | 422 naming the missing field; no run starts | MUST |
 | AC-42 | A turn where the model emits text AND then requests a tool | Both are translated | `TEXT_MESSAGE_END` is emitted BEFORE that turn's `TOOL_CALL_START`. At no point are a text message and a tool call open at the same time | MUST |
 | AC-12 | A run producing no text | The run completes | No `TEXT_MESSAGE_*` event is emitted, and `RUN_STARTED`/`RUN_FINISHED` still bracket the run | MUST |
 | AC-13 | Azure sends argument deltas | Args are translated | More than one `TOOL_CALL_ARGS` is emitted for that call, and concatenating their `delta` fields yields the tool's complete argument JSON | MUST |
@@ -410,6 +412,7 @@ so alloy maps one onto the other rather than storing transcripts itself.
 | FR-09 | System | MUST emit `STATE_DELTA` as RFC 6902 JSON Patch arrays, recording the patch made rather than diffing two objects | MUST | AC-15, AC-16 |
 | FR-10 | System | MUST carry conversation and tool activity in state: messages, in-flight tool calls, completed tool calls, tool failures | MUST | AC-17, AC-30 |
 | FR-11 | System | MUST parse `RunAgentInput` and echo its `threadId`/`runId` into every lifecycle event | MUST | AC-01, AC-02 |
+| FR-26 | System | MUST take the newest `role: "user"` message as the turn's prompt, and MUST NOT replay client-supplied history into the model — the backend conversation is authoritative | MUST | AC-43, AC-44 |
 | FR-12 | System | MUST treat `RunAgentInput.messages` and `.context` as untrusted client data, never as instructions, and MUST NOT let a client-supplied system message replace the agent's own | MUST | AC-31, AC-32, AC-33 |
 | FR-13 | System | MUST expose `POST /` on the example server accepting `RunAgentInput` and returning an SSE stream typed from the encoder | MUST | AC-28 |
 | FR-14 | System | MUST keep existing `/ping` and `/invoke` routes behaviourally unchanged | MUST | Regression |
@@ -597,7 +600,7 @@ is contained. This is a named limitation, not a defect, and it belongs in the RE
 
 ### 6.1 Launch Criteria (go/no-go)
 
-- [ ] Every `MUST` acceptance criterion (AC-01 to AC-26, AC-28 to AC-42) passes.
+- [ ] Every `MUST` acceptance criterion (AC-01 to AC-26, AC-28 to AC-44) passes.
 - [ ] `uv run pytest`, `uv run ruff check .`, and `uv run pyright` all exit zero.
 - [ ] A live run against real Azure produces a stream the conformance checker validates.
 - [ ] The verification page renders a live tool-using run in a real browser, evidence captured.

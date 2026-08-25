@@ -20,6 +20,7 @@ AG-UI dependencies present.
 | tool call identity | `tool_call_id: str` | — | `agui.py` | toolCallId, tcid, id, and `call_id` **as a local name** — reading `contracts.ToolCall.call_id` is correct and required |
 | message identity | `message_id: str` | — | `agui.py` | msg_id, messageId, mid |
 | the request body | `run_input: RunAgentInput` | — | `ag_ui.core` | input, payload, request, body |
+| the new turn's prompt | `prompt: str`, from `latest_user_prompt` | — | `agui.py` | message, text, query, user_input |
 | per-run mutable bookkeeping | `_RunState` | — | `agui.py` | context, ctx, session, tracker |
 | frontend-visible state | `state: dict[str, Any]` | — | `agui.py` | snapshot, store, model |
 | state keys | `messages` · `activeToolCalls` · `completedToolCalls` · `toolFailures` | — | shape pinned in `spec.md` §4.2 | tool_calls, active, completed, failures, errors |
@@ -39,7 +40,8 @@ because its only source (`Agent.stream_async`) is async. Every helper it calls i
 | Boundary | untrusted input shape | parse fn | failure granularity |
 |---|---|---|---|
 | HTTP request body | `bytes` | `parse_run_input(raw: bytes) -> RunAgentInput` | 400 malformed JSON · 422 valid JSON, bad shape |
-| `run_input.messages` | `list[ag_ui_core.Message]` | `history_for_display(run_input)` | never raises; drops what it cannot read |
+| `run_input.messages` — the NEW prompt | `list[ag_ui_core.Message]` | `latest_user_prompt(run_input) -> str` | raises `ToolArgumentError`-free `ValueError`; the HTTP layer turns it into 422 |
+| `run_input.messages` — prior turns | `list[ag_ui_core.Message]` | none — deliberately unread | the BACKEND conversation is authoritative (A-08); client history is display-only |
 | `run_input.state` | `Any` | `seed_state(run_input) -> dict[str, Any]` | never raises; non-dict is replaced, not rejected |
 | Azure raw stream event | `Any` (SDK object) | `getattr(ev, "type", None)` guards, as `_loop.py` already does | unknown type is skipped, never raised |
 | state values, at encode time | `Any` | `json_safe(value) -> Any` | never raises; coerces to `str` |
@@ -69,7 +71,7 @@ A `RunErrorEvent.message` is `str(exc)` only. Never a traceback, never `repr`, n
 Enforced by `tests/test_design_rules.py`, which already AST-checks imports in this repo. Extend it;
 do not add a new mechanism. **Anything not listed is a bug.**
 
-- `src/alloy/agui.py` · layer 3 · may import: `ag_ui.core`, `ag_ui.encoder`, `.contracts`, `.hooks`, `._agent` (TYPE_CHECKING only), stdlib · exports: `run_stream`, `parse_run_input`, `seed_state`, `capabilities`, `check_conformance`, `ThreadStore`, `AGUI_EXTRA_HINT` · seam: **translator**
+- `src/alloy/agui.py` · layer 3 · may import: `ag_ui.core`, `ag_ui.encoder`, `.contracts`, `.hooks`, `._agent` (TYPE_CHECKING only), stdlib · exports: `run_stream`, `parse_run_input`, `latest_user_prompt`, `seed_state`, `json_safe`, `capabilities`, `check_conformance`, `ThreadStore`, `AGUI_EXTRA_HINT` · seam: **translator**
 - `src/alloy/contracts.py` · layer 0 · may import: stdlib ONLY · **must never import `ag_ui`** · seam: **vocabulary**
 - `src/alloy/hooks.py` · layer 1 · gains exactly one export, `HookRegistry.remove_callback` (see decision 2); no other change · **must never import `ag_ui`** · seam: **lifecycle**
 - `src/alloy/_loop.py` · layer 1 · may import: `.contracts`, `.hooks`, stdlib · **must never import `ag_ui`** · seam: **tool execution**
@@ -251,12 +253,13 @@ message before closing the run, so `TEXT_MESSAGE_END` is never orphaned.
 4. `alloy.agui.ThreadStore.remember(thread_id: str, conversation_id: str) -> None` — records and marks used; evicts LRU past the cap
 5. `alloy.Agent(..., conversation_id: str | None = None)` — built by the caller, never by `run_stream`
 6. `alloy.agui.run_stream(agent: Agent, run_input: RunAgentInput) -> AsyncIterator[BaseEvent]`
-7. `alloy.agui.seed_state(run_input: RunAgentInput) -> dict[str, Any]`
-8. `_RunState.apply(op: str, path: str, value: Any = None) -> dict[str, Any]`
-9. `alloy.Agent.stream_async(prompt: str) -> AsyncIterator[contracts.StreamEvent]`
-10. `alloy._loop.extract_tool_argument_delta(raw: Any) -> tuple[str, str] | None`
-11. `alloy.agui.check_conformance(events: Sequence[BaseEvent]) -> None` — raises `AssertionError` naming the rule and the offending event type
-12. `alloy.agui.capabilities() -> ag_ui_core.AgentCapabilities`
+7. `alloy.agui.latest_user_prompt(run_input: RunAgentInput) -> str` — newest `role="user"` message's text; raises `ValueError` when there is none
+8. `alloy.agui.seed_state(run_input: RunAgentInput) -> dict[str, Any]`
+9. `_RunState.apply(op: str, path: str, value: Any = None) -> dict[str, Any]`
+10. `alloy.Agent.stream_async(prompt: str) -> AsyncIterator[contracts.StreamEvent]`
+11. `alloy._loop.extract_tool_argument_delta(raw: Any) -> tuple[str, str] | None`
+12. `alloy.agui.check_conformance(events: Sequence[BaseEvent]) -> None` — raises `AssertionError` naming the rule and the offending event type
+13. `alloy.agui.capabilities() -> ag_ui_core.AgentCapabilities`
 
 ## 11. Test seams & shared fakes
 
