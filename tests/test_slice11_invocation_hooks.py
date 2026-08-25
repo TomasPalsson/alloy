@@ -6,6 +6,7 @@ See .specs/002-hooks-and-serve/spec.md AC-04, AC-06, AC-07, AC-16, AC-17 and
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
@@ -20,7 +21,7 @@ from alloy.hooks import (
     HookProvider,
     HookRegistry,
 )
-from conftest import StubConversations
+from conftest import StubConversation, StubConversations
 
 # --- stubs for __call__/invoke_async, matching tests/test_slice3_tool_loop.py exactly ---
 
@@ -139,24 +140,101 @@ def _raise_boom(event: Any) -> None:
 
 
 def test_before_invocation_fires_once_before_any_backend_call() -> None:
-    call_counts_at_emit: list[int] = []
+    """AC-06 literally: BEFORE ANY backend call, not merely before `responses.create`.
+
+    An earlier version of this test asserted only `len(client.responses.calls) == 0` at
+    emit time, and built the agent without `name=`. Both `conversations.create` and — for
+    a named agent — `list_versions`/`create_version` therefore ran BEFORE the hook, and
+    the test passed anyway. This version records a single ordered trace of every backend
+    call and the emit, and asserts the emit comes first, with `name=` set so the version
+    round trips are actually exercised.
+    """
+    trace: list[str] = []
     seen_prompts: list[str] = []
-    client = _StubClient([_StubResponse(content="hi")])
+
+    class _TracingConversations:
+        def create(self, **kwargs: Any) -> StubConversation:
+            trace.append("backend:conversations.create")
+            return StubConversation("conv_1")
+
+    class _TracingResponses:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def create(self, **kwargs: Any) -> _StubResponse:
+            trace.append("backend:responses.create")
+            self.calls.append(kwargs)
+            return _StubResponse(content="hi")
+
+    class _TracingVersion:
+        def __init__(self) -> None:
+            self.metadata: dict[str, str] = {}
+
+    class _TracingAgents:
+        def list_versions(self, agent_name: str, **kwargs: Any) -> list[_TracingVersion]:
+            trace.append("backend:agents.list_versions")
+            return []
+
+        def create_version(self, agent_name: str, **kwargs: Any) -> _TracingVersion:
+            trace.append("backend:agents.create_version")
+            return _TracingVersion()
+
+    class _TracingClient:
+        def __init__(self) -> None:
+            self.responses = _TracingResponses()
+            self.conversations = _TracingConversations()
+            self.agents = _TracingAgents()
 
     class _Recorder(HookProvider):
         def register_hooks(self, registry: HookRegistry) -> None:
             def _record(event: BeforeInvocationEvent) -> None:
-                call_counts_at_emit.append(len(client.responses.calls))
+                trace.append("hook:BeforeInvocationEvent")
                 seen_prompts.append(event.prompt)
 
             registry.add_callback(BeforeInvocationEvent, _record)
 
-    agent = Agent(model="gpt-4o", client=client, hooks=[_Recorder()])
+    client = _TracingClient()
+    agent = Agent(
+        model="gpt-4o", name="traced-agent", client=client, hooks=[_Recorder()]
+    )
     result = agent("hi there")
 
-    assert call_counts_at_emit == [0]
+    assert trace[0] == "hook:BeforeInvocationEvent", trace
+    assert trace.count("hook:BeforeInvocationEvent") == 1, trace
+    # The named agent really did make version calls, so this run exercised the path the
+    # weaker test skipped; asserting it stops someone "fixing" the test by dropping name=.
+    assert "backend:agents.list_versions" in trace, trace
+    assert "backend:conversations.create" in trace, trace
     assert seen_prompts == ["hi there"]
     assert result.text == "hi"
+
+
+async def test_before_and_after_invocation_run_on_the_same_thread() -> None:
+    """Both ends of one call must reach a hook on the same thread, on every path.
+
+    `_prepare_call` runs off the event loop for the async paths. Emitting
+    `BeforeInvocationEvent` from inside it put Before on a worker thread while After ran
+    on the caller's — so a hook holding thread-local state saw them split.
+    """
+    threads: dict[str, int] = {}
+
+    class _ThreadRecorder(HookProvider):
+        def register_hooks(self, registry: HookRegistry) -> None:
+            registry.add_callback(BeforeInvocationEvent, self._before)
+            registry.add_callback(AfterInvocationEvent, self._after)
+
+        def _before(self, event: BeforeInvocationEvent) -> None:
+            threads["before"] = threading.get_ident()
+
+        def _after(self, event: AfterInvocationEvent) -> None:
+            threads["after"] = threading.get_ident()
+
+    client = _StubClient([_StubResponse(content="hi")])
+    agent = Agent(model="gpt-4o", client=client, hooks=[_ThreadRecorder()])
+    await agent.invoke_async("hi there")
+
+    assert threads["before"] == threads["after"], threads
+    assert threads["before"] == threading.get_ident(), threads
 
 
 def test_after_invocation_fires_once_with_matching_result() -> None:

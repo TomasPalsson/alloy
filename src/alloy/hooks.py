@@ -22,7 +22,13 @@ TEvent = TypeVar("TEvent")
 
 @dataclass
 class BeforeInvocationEvent:
-    """Fires once per `__call__`/`invoke_async`/`stream_async`, before any backend call."""
+    """Fires once per `__call__`/`invoke_async`/`stream_async`, before any backend call.
+
+    "Any" is literal: before the version lookup, before the conversation is created, and
+    before the model is called — so a hook here genuinely precedes all Azure traffic.
+    Writing to `prompt` does NOT change what is sent; only the tool events are mutable in
+    a way the loop honours.
+    """
 
     agent: Agent
     prompt: str
@@ -40,7 +46,19 @@ class AfterInvocationEvent:
 class BeforeToolCallEvent:
     """Fires once per tool call, before the tool runs.
 
-    Set `cancel_tool` to a reason string to block the call without running it.
+    A callback may change what happens next, by assigning to this event:
+
+    * `cancel_tool = "<reason>"` blocks the call without running the tool. The reason
+      reaches the model as `{"cancelled": "<reason>"}`, and the resulting `ToolResult`
+      has `failure is None` — a guardrail firing correctly is a decision, not an error,
+      and never appears in `AgentResult.tool_failures`. Cancellation outranks an unknown
+      tool name: blocking `delete_prod` blocks it whether or not that tool exists.
+    * `tool_use = replace(event.tool_use, arguments=...)` rewrites what the tool receives.
+      `ToolCall` is frozen, so build a copy with `dataclasses.replace` and assign it back;
+      the loop re-reads this field after every callback has run.
+
+    With several callbacks registered, they share one event object and run in
+    registration order, so the last writer wins and each sees the previous one's value.
     """
 
     agent: Agent
@@ -50,7 +68,16 @@ class BeforeToolCallEvent:
 
 @dataclass
 class AfterToolCallEvent:
-    """Fires once per tool call, after its `ToolResult` exists."""
+    """Fires once per tool call, after its `ToolResult` exists.
+
+    Fires on every outcome — success, a tool that raised, an unknown tool, malformed or
+    missing arguments, and a call a hook cancelled. There is no path that fires
+    `BeforeToolCallEvent` without this one following it.
+
+    Assigning `result = ToolResult(...)` replaces what is submitted back to the model.
+    Callbacks run in REVERSE registration order (LIFO), so the FIRST-registered hook has
+    the last word on the result.
+    """
 
     agent: Agent
     tool_use: ToolCall

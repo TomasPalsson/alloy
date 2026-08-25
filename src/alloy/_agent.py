@@ -107,6 +107,7 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
+        self._begin(prompt)
         client = self._prepare_call(prompt)
 
         tool_failures: list[Exception] = []
@@ -149,6 +150,9 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
+        # _begin runs here, on the caller's thread, so the hook fires before any
+        # backend call and on the same thread as _finish's (AC-06).
+        self._begin(prompt)
         client = await _foundry.run_off_thread(self._prepare_call, prompt)
 
         tool_failures: list[Exception] = []
@@ -196,6 +200,9 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
+        # _begin runs here, on the caller's thread, so the hook fires before any
+        # backend call and on the same thread as _finish's (AC-06).
+        self._begin(prompt)
         client = await _foundry.run_off_thread(self._prepare_call, prompt)
 
         tool_failures: list[Exception] = []
@@ -289,12 +296,40 @@ class Agent:
 
         yield {"result": self._finish(text, tool_failures)}
 
-    def _prepare_call(self, prompt: str) -> Any:
-        """Shared setup for `__call__`/`invoke_async`/`stream_async`.
+    def _begin(self, prompt: str) -> None:
+        """Record the prompt and fire `BeforeInvocationEvent`, before any backend work.
 
-        Validates the client, creates a backend version if needed, starts the
-        conversation, and records the prompt.
+        Split out of `_prepare_call` for two reasons, both load-bearing:
+
+        * AC-06 says this event fires *before any backend call*. `_prepare_call` performs
+          three of them — `list_versions`, `create_version`, `conversations.create` — so
+          emitting from inside it fired the hook after the fact. A "before" guardrail that
+          runs after a conversation has already been provisioned is not a guardrail.
+        * `_prepare_call` runs off the event loop for the two async paths, so emitting
+          there put `BeforeInvocationEvent` on a worker thread while `AfterInvocationEvent`
+          ran on the caller's. All three paths now call this directly, so both ends of a
+          call reach a hook on the same thread.
+
+        Still the single firing site for this event; the three call paths invoke it, they
+        do not each emit.
+
+        Args:
+            prompt: The user prompt about to be sent.
         """
+        self._messages.append(contracts.Message(role="user", content=prompt))
+        self._hooks.emit(BeforeInvocationEvent(agent=self, prompt=prompt))
+
+    def _prepare_call(self, prompt: str) -> Any:
+        """Backend setup for `__call__`/`invoke_async`/`stream_async`.
+
+        Builds the client, creates a version if the config changed, and starts the
+        conversation. Call `_begin` first — every backend call this makes must happen
+        after `BeforeInvocationEvent` has fired (AC-06).
+
+        Args:
+            prompt: Unused; kept so the three paths call this and `_begin` alike.
+        """
+        del prompt
         if self._client is None:
             foundry_client = _foundry.FoundryClient(
                 endpoint=self._endpoint, credential=self._credential
@@ -309,8 +344,6 @@ class Agent:
         if self._conversation_id is None:
             self._conversation_id = _foundry.create_conversation(client)
 
-        self._messages.append(contracts.Message(role="user", content=prompt))
-        self._hooks.emit(BeforeInvocationEvent(agent=self, prompt=prompt))
         return client
 
     def _finish(self, text: str, tool_failures: list[Exception]) -> contracts.AgentResult:
