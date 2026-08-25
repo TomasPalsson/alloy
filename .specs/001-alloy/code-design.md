@@ -79,6 +79,17 @@ Tests inject a stub through `client=` — no interface to implement, only a shap
 - **No `utils/`.** A helper used by one module lives in that module. Enforced by
   `tests/test_design_rules.py::test_no_utils_module` (path check over `src/alloy/`).
 
+## 6b. Live-verified constraints (2026-08-25, against a real Foundry project)
+
+- An agent-scoped client REJECTS `model`, `instructions` and `tools` on `responses.create`:
+  `invalid_payload — Not allowed when agent is specified`. The agent VERSION carries them.
+  Send only `input` and `conversation`.
+- Tool schemas must serialize with a `type` discriminator or the service returns
+  `invalid_payload — Required discriminator 'type' is missing`. Only the SDK's own
+  `FunctionTool` adds it; a raw dict is accepted locally and rejected on the wire.
+- A rate limit arrives as a RAISED `openai.APIError` from inside `Stream.__stream__()`,
+  never as an event — the dual error path, observed for real.
+
 ## 7. Decisions
 
 - Azure seam, facing **one production backend and a test stub (the pattern gate counts a stub as zero)**: chose **concrete `_foundry.FoundryClient` + an `.importlinter` contract**, rejected **a `Backend` Protocol**, to contain blast radius without a one-implementer interface, accepting **a second backend means editing `_agent.py`, not adding a class**. `Makes hard:` a second backend — touches `_agent.py`, `_foundry.py`.

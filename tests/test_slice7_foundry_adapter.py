@@ -144,3 +144,21 @@ def test_map_version_creation_error_leaves_programming_errors_unmapped() -> None
     )
 
     assert mapped is None
+
+
+def test_tool_schemas_carry_the_type_discriminator_the_service_requires() -> None:
+    """Regression: raw dicts serialize without `type` and the service rejects the payload.
+
+    Live failure this guards: `invalid_payload — Required discriminator 'type' is missing`.
+    """
+    from alloy._foundry import build_prompt_agent_definition
+
+    definition = build_prompt_agent_definition(
+        model="gpt-5-mini",
+        instructions="be helpful",
+        tools=[{"name": "get_oncall", "description": "d", "parameters": {"type": "object"}}],
+    )
+    payload = dict(definition)
+    assert payload["tools"][0]["type"] == "function"
+    assert payload["kind"] == "prompt"
+    assert payload["instructions"] == "be helpful"

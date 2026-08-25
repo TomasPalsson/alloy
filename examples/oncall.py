@@ -26,7 +26,7 @@ def check_service_status(service_name: str) -> str:
 def main() -> None:
     """Ask the on-call agent about checkout-api and print its answer."""
     agent = Agent(
-        model="gpt-4o",
+        model="gpt-5-mini",
         system_prompt="You are an on-call assistant. Use tools to check real service status.",
         tools=[check_service_status],
         name="oncall-assistant",

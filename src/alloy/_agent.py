@@ -116,10 +116,11 @@ class Agent:
         next_input: str | list[dict[str, str]] = prompt
         while True:
             response = client.responses.create(
-                model=self._model,
+                # No model/instructions/tools here: the client is scoped to an agent and
+                # the agent VERSION already carries them. Passing them is rejected with
+                # 'Not allowed when agent is specified.' (live, verified).
                 input=next_input,
                 conversation=self._conversation_id,
-                instructions=self._system_prompt,
             )
             calls = extract_tool_calls(response)
             if not calls:
@@ -155,10 +156,8 @@ class Agent:
         while True:
             response = await _foundry.create_completion(
                 client,
-                model=self._model,
                 input=next_input,
                 conversation=self._conversation_id,
-                instructions=self._system_prompt,
             )
             calls = extract_tool_calls(response)
             if not calls:
@@ -206,11 +205,10 @@ class Agent:
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[Any] = asyncio.Queue()
             stop_requested = threading.Event()
+            # See the note above: an agent-scoped client rejects model/instructions here.
             create_kwargs = {
-                "model": self._model,
                 "input": next_input,
                 "conversation": self._conversation_id,
-                "instructions": self._system_prompt,
             }
 
             def _pump(

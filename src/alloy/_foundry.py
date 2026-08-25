@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Sequence
 from typing import Any, cast
 
 from azure.ai.projects import AIProjectClient
-from azure.ai.projects.models import PromptAgentDefinition
+from azure.ai.projects.models import FunctionTool, PromptAgentDefinition
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 from azure.identity import DefaultAzureCredential
 from openai import AuthenticationError as OpenAIAuthenticationError
@@ -97,17 +98,36 @@ def open_stream(client: Any, **create_kwargs: Any) -> Any:
         raise StreamingUnsupportedError(f"backend does not support streaming: {exc}") from exc
 
 
+def _as_sdk_tool(item: Any) -> Any:
+    """Wrap one derived tool schema in the SDK type; forward anything else untouched.
+
+    A raw dict is accepted locally but REJECTED by the service: the wire format needs a
+    `type` discriminator ("invalid_payload — Required discriminator 'type' is missing"),
+    and only the SDK's own `FunctionTool` adds it. Pass-through tool objects are already
+    typed, so they are forwarded unmodified (FR-013).
+    """
+    if not isinstance(item, dict):
+        return item
+    schema = cast(dict[str, Any], item)
+    return cast(Any, FunctionTool)(
+        name=schema["name"],
+        description=schema.get("description", ""),
+        parameters=schema.get("parameters", {}),
+    )
+
+
 def build_prompt_agent_definition(
-    *, model: str, instructions: str, tools: list[dict[str, Any]]
+    *, model: str, instructions: str, tools: Sequence[Any]
 ) -> Any:
     """Build the real SDK agent definition (`_agent.py` may not import azure.* to do this).
 
-    Maps alloy's `system_prompt` onto the SDK's `instructions` field — the field is named
+    Maps alloy's `system_prompt` onto the SDK's `instructions` field — that field is named
     `system_prompt` nowhere in `PromptAgentDefinition`.
     """
-    # alloy's tool schemas are plain JSON-Schema dicts, not typed `Tool` subclasses — the
-    # SDK model accepts them at runtime; `cast` only satisfies the type checker.
-    return PromptAgentDefinition(model=model, instructions=instructions, tools=cast(Any, tools))
+    typed_tools = [_as_sdk_tool(item) for item in tools]
+    return PromptAgentDefinition(
+        model=model, instructions=instructions, tools=cast(Any, typed_tools)
+    )
 
 
 def map_version_creation_error(error: Exception, *, agent_name: str) -> Exception | None:
