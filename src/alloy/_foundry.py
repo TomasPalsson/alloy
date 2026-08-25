@@ -27,37 +27,34 @@ async def stream_completion(client: Any, **create_kwargs: Any) -> AsyncGenerator
     """Run one streaming `client.chat.completions.create(stream=True)` call on a worker thread.
 
     Yields each raw SDK event as it arrives. A client whose `create` does not accept
-    `stream` raises `StreamingUnsupportedError`
-    (see B19). An SSE `error` frame can arrive either as an event with `type == "error"`
-    or as a raised exception from inside the SDK's own stream iteration (the dual error
-    path called out in the streaming reference doc) — both are forwarded to the caller.
-    Abandoning iteration (breaking, or closing the generator) stops the worker thread
-    before cleanup completes (see B26).
+    `stream` raises `StreamingUnsupportedError` (see B19). An SSE `error` frame can
+    arrive either as an event with `type == "error"` or as a raised exception from
+    inside the SDK's own stream iteration (the dual error path called out in the
+    streaming reference doc) — both are forwarded to the caller. Abandoning iteration
+    (breaking, or closing the generator) stops the worker thread before cleanup
+    completes (see B26).
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()
     stop_requested = threading.Event()
 
     def _pump() -> None:
+        # A single try/except/finally so _DONE is queued no matter where this fails —
+        # otherwise a consumer awaiting an empty queue would hang forever.
         try:
-            raw_stream = client.chat.completions.create(**create_kwargs, stream=True)
-        except TypeError as exc:
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                StreamingUnsupportedError(f"backend does not support streaming: {exc}"),
-            )
-            loop.call_soon_threadsafe(queue.put_nowait, _DONE)
-            return
-        try:
+            try:
+                raw_stream = client.chat.completions.create(**create_kwargs, stream=True)
+            except TypeError as exc:
+                raise StreamingUnsupportedError(
+                    f"backend does not support streaming: {exc}"
+                ) from exc
             for raw_event in raw_stream:
                 if stop_requested.is_set():
                     return
                 if getattr(raw_event, "type", None) == "error":
-                    message = getattr(raw_event, "message", "stream error")
-                    loop.call_soon_threadsafe(queue.put_nowait, AlloyError(message))
-                    return
+                    raise AlloyError(getattr(raw_event, "message", "stream error"))
                 loop.call_soon_threadsafe(queue.put_nowait, raw_event)
-        except Exception as exc:  # the dual error path: an SSE error raised as an exception
+        except Exception as exc:  # includes the dual error path: an SSE error raised directly
             loop.call_soon_threadsafe(queue.put_nowait, exc)
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, _DONE)
