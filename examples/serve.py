@@ -38,7 +38,13 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from alloy import Agent
+from alloy import Agent, tool
+from alloy.hooks import (
+    AfterToolCallEvent,
+    BeforeToolCallEvent,
+    HookProvider,
+    HookRegistry,
+)
 
 PORT = 8080
 
@@ -129,12 +135,62 @@ def _json_safe(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+@tool
+def check_service_status(service_name: str) -> str:
+    """Look up whether a service is currently healthy.
+
+    Args:
+        service_name: The service to check, e.g. "checkout-api".
+    """
+    known_incidents = {"checkout-api": "degraded - elevated latency since 09:12 UTC"}
+    return known_incidents.get(service_name, "no known incidents")
+
+
+class AuditLog(HookProvider):
+    """Writes one stderr line per tool call, so the server log shows what the model did."""
+
+    def register_hooks(self, registry: HookRegistry) -> None:
+        """Listen for both ends of every tool call.
+
+        Args:
+            registry: The agent's hook registry.
+        """
+        registry.add_callback(BeforeToolCallEvent, self.on_before)
+        registry.add_callback(AfterToolCallEvent, self.on_after)
+
+    def on_before(self, event: BeforeToolCallEvent) -> None:
+        """Record that a tool is about to run.
+
+        Args:
+            event: The pending tool call.
+        """
+        print(f"[audit] -> {event.tool_use.name}({event.tool_use.arguments})", file=sys.stderr)
+
+    def on_after(self, event: AfterToolCallEvent) -> None:
+        """Record how a tool call turned out.
+
+        Args:
+            event: The completed tool call and its result.
+        """
+        outcome = "failed" if event.result.failure is not None else "ok"
+        print(f"[audit] <- {event.tool_use.name} {outcome}", file=sys.stderr)
+
+
 def _build_agent() -> Agent:
-    """Build one fresh Agent for a single request (see the module docstring on why)."""
+    """Build one fresh Agent for a single request (see the module docstring on why).
+
+    Carries a tool and an audit hook so the server demonstrates both — a bare agent
+    would exercise the HTTP plumbing without exercising anything alloy adds.
+    """
     return Agent(
         model="gpt-5-mini",
-        system_prompt="You are a helpful assistant reachable over HTTP.",
+        system_prompt=(
+            "You are an on-call assistant reachable over HTTP. "
+            "Use your tools to check real service status; never guess."
+        ),
+        tools=[check_service_status],
         name="http-agent",
+        hooks=[AuditLog()],
     )
 
 
@@ -196,7 +252,10 @@ def main() -> None:
             "to any host that can reach this port. Do not do this on an untrusted network.",
             file=sys.stderr,
         )
-    print(f"alloy serve: listening on {args.host}:{PORT}")
+    # flush=True: stdout is block-buffered when piped to a file or a log collector, so
+    # without it the operator sees nothing until the buffer fills — which for a server
+    # that then blocks in serve_forever() is effectively never.
+    print(f"alloy serve: listening on {args.host}:{PORT}", flush=True)
 
     server = ThreadingHTTPServer((args.host, PORT), _make_handler(_build_agent))
     server.serve_forever()
