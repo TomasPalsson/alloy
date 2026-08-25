@@ -120,8 +120,10 @@ Strands' signatures are the default; `alloy` deviates only where Azure genuinely
 
 ## Architecture
 
-Exactly one module imports `azure.ai.projects`. Everything else talks to a narrow backend
-protocol. Two consequences:
+Exactly one module, `src/alloy/_foundry.py`, imports `azure.ai.projects` or `openai`. Every
+other module is forbidden from doing so — enforced by an AST-walking test,
+`test_b23_azure_and_openai_imports_confined_to_foundry` in `tests/test_design_rules.py`, not
+by convention alone. Two consequences:
 
 - The entire test suite runs offline against a fake, with no Azure credentials.
 - When Foundry's SDK shifts — and it is shifting; the classic Assistants API retires
@@ -139,15 +141,48 @@ az login
 
 Note that endpoint is **project**-scoped. The bare account endpoint will not work.
 
-## Known-unverified
+## Serving over HTTP
 
-Honesty beats confidence on a preview platform. Two behaviours are specified but not yet
-confirmed against a live Foundry endpoint:
+`examples/serve.py` puts an agent behind a stdlib-only HTTP server — no FastAPI, no
+uvicorn, no Azure SDK beyond what `alloy` itself needs.
 
-| Behaviour | Status | How `alloy` handles it |
-|---|---|---|
-| Function-call round-trip shape | Assumed to follow the OpenAI Responses API | Isolated behind the backend protocol; one file changes if wrong |
-| `stream=True` support | Unconfirmed on Foundry | Raises `StreamingUnsupportedError` rather than failing obscurely |
+```bash
+export AZURE_AI_PROJECT_ENDPOINT="https://<account>.services.ai.azure.com/api/projects/<project>"
+az login
+uv run examples/serve.py
+```
+
+```bash
+curl http://127.0.0.1:8080/ping
+
+curl -X POST http://127.0.0.1:8080/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Who is on call for the data team?"}'
+
+curl -N -X POST http://127.0.0.1:8080/invoke \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "Who is on call for the data team?", "stream": true}'
+```
+
+Binds `127.0.0.1` by default; pass `--host 0.0.0.0` to accept connections from other hosts (a
+container needs this) — the flag prints a warning, since the server has no authentication.
+
+**AWS mapping.** AgentCore Runtime *mandates* `POST /invocations` and `GET /ping` on
+`0.0.0.0:8080` and enforces the contract itself. Nothing on the Azure side validates a path
+name, so this example serves both `/invoke` and `/invocations` and the choice between them is
+cosmetic — `/invocations` exists purely so the same client code works unmodified against
+either platform.
+
+## Verified live
+
+Both behaviours the previous build could only assume have since been confirmed against a
+live Foundry endpoint:
+
+- **Function-call round-trip shape** matches the OpenAI Responses API's
+  `function_call`/`function_call_output` items, exactly as assumed.
+- **`stream=True`** is supported; text deltas arrive as `response.output_text.delta` /
+  `.done`, and tool calls surface via `response.output_item.done`, exactly as `_loop.py`
+  expects.
 
 ## Development
 
