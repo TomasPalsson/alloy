@@ -49,10 +49,31 @@ class _StubConversations:
         return _StubConversation("conv_1")
 
 
+class _StubVersion:
+    def __init__(self, metadata: dict[str, str]) -> None:
+        self.metadata = metadata
+
+
+class _StubAgentsOperations:
+    def __init__(self) -> None:
+        self.create_calls: list[dict[str, Any]] = []
+
+    def list_versions(self, agent_name: str, **kwargs: Any) -> list[_StubVersion]:
+        return []
+
+    def create_version(self, agent_name: str, **kwargs: Any) -> _StubVersion:
+        self.create_calls.append({"agent_name": agent_name, **kwargs})
+        return _StubVersion(metadata=kwargs.get("metadata", {}))
+
+
 class _StubClient:
-    def __init__(self, responses: list[_StubResponse]) -> None:
+    def __init__(
+        self, responses: list[_StubResponse], agents: _StubAgentsOperations | None = None
+    ) -> None:
         self.responses = _StubResponses(responses)
         self.conversations = _StubConversations()
+        if agents is not None:
+            self.agents = agents
 
 
 def test_renamed_tool_is_reachable_by_its_override_name() -> None:
@@ -71,6 +92,10 @@ def test_renamed_tool_is_reachable_by_its_override_name() -> None:
 
 
 def test_renamed_tool_schema_carries_override_name_not_function_name() -> None:
+    """The name that reaches the backend's create_version call must be the @tool override,
+    not the Python function name — checked at the real boundary the backend sees (AC in
+    spec.md §7-FR-B1), not by reaching into Agent's private tool bookkeeping."""
+
     @tool(name="renamed_lookup")
     def get_oncall(team: str) -> str:
         """Get the on-call engineer for a team.
@@ -80,14 +105,17 @@ def test_renamed_tool_schema_carries_override_name_not_function_name() -> None:
         """
         return f"{team}-oncall"
 
-    agent = Agent(model="gpt-4o", tools=[get_oncall], client=_StubClient([]))
+    agents = _StubAgentsOperations()
+    client = _StubClient([_StubResponse(content="hi")], agents=agents)
+    agent = Agent(model="gpt-4o", tools=[get_oncall], name="oncall-agent", client=client)
 
-    assert "renamed_lookup" in agent._tool_map
-    assert "get_oncall" not in agent._tool_map
-    assert [spec.name for spec in agent._tool_specs] == ["renamed_lookup"]
+    agent("who is on call?")
+
+    tool_names = [t.name for t in agents.create_calls[0]["definition"].tools]
+    assert tool_names == ["renamed_lookup"]
 
 
-def test_overridden_description_survives_into_the_agent_tool_spec() -> None:
+def test_overridden_description_survives_to_the_backend_definition() -> None:
     @tool(description="overridden text")
     def get_oncall(team: str) -> str:
         """Original summary.
@@ -97,9 +125,14 @@ def test_overridden_description_survives_into_the_agent_tool_spec() -> None:
         """
         return f"{team}-oncall"
 
-    agent = Agent(model="gpt-4o", tools=[get_oncall], client=_StubClient([]))
+    agents = _StubAgentsOperations()
+    client = _StubClient([_StubResponse(content="hi")], agents=agents)
+    agent = Agent(model="gpt-4o", tools=[get_oncall], name="oncall-agent", client=client)
 
-    assert agent._tool_map["get_oncall"].description == "overridden text"
+    agent("who is on call?")
+
+    tool_descriptions = [t.description for t in agents.create_calls[0]["definition"].tools]
+    assert tool_descriptions == ["overridden text"]
 
 
 def test_non_serializable_tool_return_becomes_a_type_error_failure() -> None:
