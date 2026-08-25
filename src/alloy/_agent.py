@@ -11,7 +11,9 @@ from typing import Any, cast
 from . import _foundry, contracts
 from ._loop import (
     extract_final_text_from_stream_event,
+    extract_tool_argument_delta,
     extract_tool_call_from_stream_item,
+    extract_tool_call_start,
     extract_tool_calls,
     run_calls,
     translate_stream_event,
@@ -211,6 +213,10 @@ class Agent:
             text_parts: list[str] = []
             final_text: str | None = None
             pending_calls: list[contracts.ToolCall] = []
+            # Argument-delta events carry only `item_id`; the `call_id` every other layer
+            # uses appears once, on the `output_item.added` event that opens the call.
+            # Per-turn, because item ids are only unique within one response.
+            call_id_by_item_id: dict[str, str] = {}
 
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -260,6 +266,21 @@ class Agent:
                     if text_event is not None:
                         text_parts.append(cast(str, text_event["data"]))
                         yield text_event
+
+                    started = extract_tool_call_start(raw_event)
+                    if started is not None:
+                        call_id_by_item_id[str(raw_event.item.id)] = started.call_id
+                        yield {"tool_call_started": started}
+
+                    argument_delta = extract_tool_argument_delta(raw_event)
+                    if argument_delta is not None:
+                        item_id, fragment = argument_delta
+                        # No mapping means the deltas arrived without their opening event.
+                        # Drop rather than invent an id: a fragment attributed to the wrong
+                        # call corrupts that call's arguments silently.
+                        known_call_id = call_id_by_item_id.get(item_id)
+                        if known_call_id is not None:
+                            yield {"tool_arguments_delta": (known_call_id, fragment)}
 
                     call = extract_tool_call_from_stream_item(raw_event)
                     if call is not None:

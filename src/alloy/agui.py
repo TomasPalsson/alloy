@@ -314,6 +314,9 @@ async def run_stream(
     # yield. Drained (and cleared) at every point below that could otherwise let a result
     # go unreported: before handling each new stream event, after the loop, and on error.
     pending_results: list[contracts.ToolResult] = []
+    # Tool calls whose TOOL_CALL_START already went out, so `current_tool_use` knows to
+    # only close them rather than re-emit the whole bracket.
+    opened_tool_call_ids: set[str] = set()
 
     def _record_result(event: AfterToolCallEvent) -> None:
         pending_results.append(event.result)
@@ -330,8 +333,32 @@ async def run_stream(
             for result in _drain():
                 yield _tool_result_event(result)
 
+            if "tool_call_started" in event:
+                started = cast(contracts.ToolCall, event["tool_call_started"])
+                if message_id is not None:
+                    yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
+                    message_id = None
+                opened_tool_call_ids.add(started.call_id)
+                yield ag_ui_core.ToolCallStartEvent(
+                    tool_call_id=started.call_id, tool_call_name=started.name
+                )
+                continue
+
+            if "tool_arguments_delta" in event:
+                streamed_call_id, fragment = cast("tuple[str, str]", event["tool_arguments_delta"])
+                yield ag_ui_core.ToolCallArgsEvent(tool_call_id=streamed_call_id, delta=fragment)
+                continue
+
             if "current_tool_use" in event:
                 call = cast(contracts.ToolCall, event["current_tool_use"])
+                if call.call_id in opened_tool_call_ids:
+                    # Bracket already open and its arguments already streamed; this event
+                    # only closes it. Re-emitting ARGS would repeat the whole payload after
+                    # the fragments that already carried it.
+                    yield ag_ui_core.ToolCallEndEvent(tool_call_id=call.call_id)
+                    continue
+                # No start event arrived, so the call was delivered whole rather than
+                # streamed. Emit the complete bracket from this one event.
                 if message_id is not None:
                     yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
                     message_id = None

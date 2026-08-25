@@ -80,9 +80,11 @@ class _RawEvent:
 
 
 class _RawArgsDeltaEvent:
-    def __init__(self, call_id: str, delta: str) -> None:
+    # Mirrors the real event: verified against live Azure it carries item_id and NOT
+    # call_id. A stub with call_id would let a broken extractor pass.
+    def __init__(self, item_id: str, delta: str) -> None:
         self.type = "response.function_call_arguments.delta"
-        self.call_id = call_id
+        self.item_id = item_id
         self.delta = delta
 
 
@@ -90,7 +92,6 @@ class _RawArgsDeltaEvent:
 _OTHER_APPENDIX_D_RAW_TYPES = [
     "response.created",
     "response.in_progress",
-    "response.output_item.added",
     "response.function_call_arguments.done",
     "response.output_item.done",
     "response.content_part.added",
@@ -112,9 +113,18 @@ def test_extract_tool_argument_delta_returns_none_for_event_with_no_type_attribu
     assert extract_tool_argument_delta(object()) is None
 
 
-def test_extract_tool_argument_delta_reads_call_id_and_delta_off_the_matching_event() -> None:
-    event = _RawArgsDeltaEvent(call_id="call-1", delta='{"')
-    assert extract_tool_argument_delta(event) == ("call-1", '{"')
+def test_extract_tool_argument_delta_reads_item_id_and_delta_off_the_matching_event() -> None:
+    event = _RawArgsDeltaEvent(item_id="fc_abc", delta='{"')
+    assert extract_tool_argument_delta(event) == ("fc_abc", '{"')
+
+
+def test_extract_tool_argument_delta_returns_item_id_since_call_id_is_absent() -> None:
+    # Live Azure sends only ('delta', 'item_id', 'output_index', 'sequence_number', 'type').
+    # An extractor reading call_id would return None forever and the feature would degrade
+    # to one batched chunk with no error at all.
+    event = _RawArgsDeltaEvent(item_id="fc_abc", delta="x")
+    assert not hasattr(event, "call_id")
+    assert extract_tool_argument_delta(event) == ("fc_abc", "x")
 
 
 @pytest.mark.parametrize("fragment", _ARGUMENT_FRAGMENTS)
@@ -123,8 +133,8 @@ def test_extract_tool_argument_delta_passes_every_appendix_d_fragment_through_un
 ) -> None:
     # Each fragment round-trips byte-for-byte - the extractor must not trim, strip, or
     # otherwise "clean up" a delta that (correctly) isn't valid JSON on its own.
-    event = _RawArgsDeltaEvent(call_id="call-weather", delta=fragment)
-    assert extract_tool_argument_delta(event) == ("call-weather", fragment)
+    event = _RawArgsDeltaEvent(item_id="fc_weather", delta=fragment)
+    assert extract_tool_argument_delta(event) == ("fc_weather", fragment)
 
 
 # --- B22: a single delta need not be valid JSON; only the concatenation is --------------
@@ -208,6 +218,11 @@ def test_b21_thirteen_real_fragments_yield_more_than_one_tool_call_args_that_con
     call = ToolCall(call_id="call-1", name="get_weather", arguments=_FULL_ARGUMENTS_JSON)
     result = ToolResult(call_id="call-1", output=json.dumps({"temp": 5}))
     fake.steps = [
+        # Azure names the tool at output_item.added, BEFORE any fragment, which is what
+        # lets TOOL_CALL_START open the bracket the fragments then stream into. Buffering
+        # them until the call completes would flush all 13 at one instant and render as
+        # one blob — the behaviour this slice exists to replace.
+        {"tool_call_started": ToolCall(call_id="call-1", name="get_weather", arguments="")},
         *({"tool_arguments_delta": ("call-1", fragment)} for fragment in _ARGUMENT_FRAGMENTS),
         {"current_tool_use": call},
         AfterToolCallEvent(agent=cast(Agent, fake), tool_use=call, result=result),
@@ -233,6 +248,9 @@ def test_b21_thirteen_real_fragments_yield_more_than_one_tool_call_args_that_con
     args_indices = [events.index(a) for a in args]
     assert start_idx < min(args_indices)
     assert max(args_indices) < end_idx
+    # The completing event must only CLOSE the bracket; re-emitting ARGS there would
+    # repeat the whole payload after the fragments that already carried it.
+    assert len(args) == len(_ARGUMENT_FRAGMENTS)
     agui.check_conformance(events)
 
 
