@@ -9,7 +9,7 @@ import pytest
 import alloy
 from alloy import Agent, tool
 from alloy._versions import fingerprint
-from conftest import _StubConversations
+from conftest import StubConversations
 
 
 class _StubResponse:
@@ -58,7 +58,7 @@ class _StubAgentsOperations:
 class _StubClient:
     def __init__(self, agents: _StubAgentsOperations, content: str = "hello") -> None:
         self.responses = _StubResponses(content)
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
         self.agents = agents
 
 

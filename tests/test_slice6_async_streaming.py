@@ -14,7 +14,7 @@ import pytest
 from alloy import Agent, StreamingUnsupportedError
 from alloy._schema import tool
 from alloy.contracts import AgentResult, ToolCall
-from conftest import _StubConversations
+from conftest import StubConversations
 
 
 class _StubResponse:
@@ -103,7 +103,7 @@ class _StubDelayedStreamResponses:
 class _StubStreamingClient:
     def __init__(self, responses: Any) -> None:
         self.responses = responses
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
 
 
 class _StubBlockingResponses:
@@ -121,7 +121,7 @@ class _StubBlockingResponses:
 class _StubBlockingClient:
     def __init__(self, content: str, delay: float = 0.05) -> None:
         self.responses = _StubBlockingResponses(content, delay)
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
 
 
 class _StubSlowAgentsOperations:
@@ -143,7 +143,7 @@ class _StubNamedBlockingClient:
 
     def __init__(self, content: str, delay: float = 0.05) -> None:
         self.responses = _StubBlockingResponses(content, delay)
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
         self.agents = _StubSlowAgentsOperations(delay)
 
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from alloy import Agent
 from alloy.contracts import Message
-from conftest import _StubConversations
+from conftest import StubConversations
 
 
 class _StubResponse:
@@ -27,7 +27,7 @@ class _StubResponses:
 class _StubClient:
     def __init__(self) -> None:
         self.responses = _StubResponses()
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
 
 
 def test_b12_second_call_passes_same_conversation_id_to_client() -> None:

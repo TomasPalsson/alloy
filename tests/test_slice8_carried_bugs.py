@@ -11,7 +11,7 @@ from alloy import Agent
 from alloy._loop import run_calls
 from alloy._schema import derive, tool
 from alloy.contracts import ToolCall
-from conftest import _StubConversations
+from conftest import StubConversations
 
 
 class _FunctionCallItem:
@@ -62,7 +62,7 @@ class _StubClient:
         self, responses: list[_StubResponse], agents: _StubAgentsOperations | None = None
     ) -> None:
         self.responses = _StubResponses(responses)
-        self.conversations = _StubConversations()
+        self.conversations = StubConversations()
         if agents is not None:
             self.agents = agents
 
