@@ -1,10 +1,10 @@
 """Azure adapter: the only module allowed to import `azure.*` or `openai` (see contract).
 
 Maps SDK auth failures to `BackendAuthError` here, and only here, so a token or secret
-can never reach a message (see B21, B22). The blocking-call-to-thread hop for
-`Agent.invoke_async`/`Agent.stream_async` lives in `_agent.py`, alongside its two
-`async def`s (see B30 and the "Async" decision in code-design.md) — this module only
-opens the underlying (still blocking) SDK calls.
+can never reach a message (see B21, B22). `Agent`'s two `async def`s (`invoke_async`,
+`stream_async`, see B30) await coroutines this module hands back (`create_completion`,
+`run_off_thread`) rather than calling `asyncio.to_thread` themselves — this module owns
+the thread hop for the underlying (still blocking) SDK calls.
 """
 
 from __future__ import annotations
@@ -85,6 +85,17 @@ def create_completion(client: Any, **create_kwargs: Any) -> Any:
     return asyncio.to_thread(client.responses.create, **create_kwargs)
 
 
+def run_off_thread(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Return the coroutine for one blocking call (e.g. `Agent._prepare_call`) off the loop.
+
+    A plain function, not `async def`, mirroring `create_completion` above (see B30 and F1):
+    the `asyncio.to_thread` hop for `invoke_async`/`stream_async`'s setup — FoundryClient
+    construction, `_ensure_version`, `create_conversation` — lives here, not as a direct
+    `asyncio.to_thread` call inside `_agent.py`.
+    """
+    return asyncio.to_thread(fn, *args, **kwargs)
+
+
 def open_stream(client: Any, **create_kwargs: Any) -> Any:
     """Start one streaming `client.responses.create(stream=True)` call.
 
@@ -103,12 +114,15 @@ def _as_sdk_tool(item: Any) -> Any:
 
     A raw dict is accepted locally but REJECTED by the service: the wire format needs a
     `type` discriminator ("invalid_payload — Required discriminator 'type' is missing"),
-    and only the SDK's own `FunctionTool` adds it. Pass-through tool objects are already
-    typed, so they are forwarded unmodified (FR-013).
+    and only the SDK's own `FunctionTool` adds it. `derive()`'s own schemas never carry a
+    top-level `type` key; anything that already has one (already-typed, wire-ready — a
+    pass-through dict or SDK object) is forwarded unmodified (FR-013, see F3).
     """
     if not isinstance(item, dict):
         return item
     schema = cast(dict[str, Any], item)
+    if "type" in schema:
+        return cast(Any, item)
     return cast(Any, FunctionTool)(
         name=schema["name"],
         description=schema.get("description", ""),
@@ -141,8 +155,15 @@ def map_version_creation_error(error: Exception, *, agent_name: str) -> Exceptio
         return BackendAuthError(_REAUTH_MESSAGE)
     if isinstance(error, HttpResponseError):
         code = (getattr(getattr(error, "error", None), "code", None) or "").lower()
-        if error.status_code == 429 or "quota" in code or "cap" in code:
+        text = str(error).lower()
+        # A 429 alone is a plain rate limit, not a version cap — only genuine cap/quota
+        # wording (in the structured code or the message) means "no versions left" (F6).
+        if "quota" in code or "cap" in code or "quota" in text or "cap" in text:
             return VersionCapError(f"Agent {agent_name!r} cannot create a new version: {error}")
+        if error.status_code == 429:
+            return AlloyError(
+                f"Foundry rate-limited the version request for agent {agent_name!r}: {error}"
+            )
         return AlloyError(f"Foundry rejected the version request for agent {agent_name!r}: {error}")
     text = str(error).lower()
     if "cap" in text or "quota" in text:

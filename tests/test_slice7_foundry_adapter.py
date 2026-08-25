@@ -138,6 +138,27 @@ def test_map_version_creation_error_maps_other_http_failure_to_alloy_error() -> 
     assert not isinstance(mapped, alloy.VersionCapError)
 
 
+def test_map_version_creation_error_plain_429_is_a_rate_limit_not_a_version_cap() -> None:
+    """A plain 429 is a rate limit, not a version cap (see F6) — conflating the two would
+    tell a rate-limited caller to go manage agent versions."""
+    http_error = HttpResponseError(message="Too Many Requests")
+    http_error.status_code = 429
+
+    mapped = _foundry.map_version_creation_error(http_error, agent_name="weather-agent")
+
+    assert not isinstance(mapped, alloy.VersionCapError)
+    assert isinstance(mapped, alloy.AlloyError)
+
+
+def test_map_version_creation_error_429_naming_quota_is_still_a_version_cap() -> None:
+    http_error = HttpResponseError(message="quota exceeded for agent versions")
+    http_error.status_code = 429
+
+    mapped = _foundry.map_version_creation_error(http_error, agent_name="weather-agent")
+
+    assert isinstance(mapped, alloy.VersionCapError)
+
+
 def test_map_version_creation_error_leaves_programming_errors_unmapped() -> None:
     mapped = _foundry.map_version_creation_error(
         AttributeError("'OpenAI' object has no attribute 'agents'"), agent_name="weather-agent"

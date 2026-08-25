@@ -26,6 +26,10 @@ _TOOL_SPEC_ATTRIBUTE = "__alloy_tool_spec__"
 # Sentinel queued by stream_async's worker thread to signal "no more events this turn".
 _STREAM_DONE = object()
 
+# A model that keeps emitting tool calls (a quirk, or instructions smuggled in through a
+# tool's own output text) must not loop forever — see F4.
+_MAX_TOOL_TURNS = 10
+
 
 class _ToolNamespace:
     """Attribute access over an agent's own tools.
@@ -65,6 +69,9 @@ class Agent:
             if hasattr(t, _TOOL_SPEC_ATTRIBUTE)
         ]
         self._tool_map = {spec.name: spec for spec in self._tool_specs}
+        # Non-decorated tools carry no schema to derive and are never run locally (B11) —
+        # kept as-is and forwarded untouched to the backend definition (FR-013, see F3).
+        self._passthrough_tools = [t for t in tools if not hasattr(t, _TOOL_SPEC_ATTRIBUTE)]
         self._name = name
         self._endpoint = endpoint
         self._credential = credential
@@ -114,7 +121,7 @@ class Agent:
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
-        while True:
+        for _turn in range(_MAX_TOOL_TURNS):
             response = client.responses.create(
                 # No model/instructions/tools here: the client is scoped to an agent and
                 # the agent VERSION already carries them. Passing them is rejected with
@@ -139,6 +146,10 @@ class Agent:
                         "output": result.output,
                     }
                 )
+        else:
+            raise contracts.AlloyError(
+                f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
+            )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
@@ -149,11 +160,11 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
-        client = self._prepare_call(prompt)
+        client = await _foundry.run_off_thread(self._prepare_call, prompt)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
-        while True:
+        for _turn in range(_MAX_TOOL_TURNS):
             response = await _foundry.create_completion(
                 client,
                 input=next_input,
@@ -176,6 +187,10 @@ class Agent:
                         "output": result.output,
                     }
                 )
+        else:
+            raise contracts.AlloyError(
+                f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
+            )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
@@ -193,11 +208,11 @@ class Agent:
         Args:
             prompt: The user prompt to send.
         """
-        client = self._prepare_call(prompt)
+        client = await _foundry.run_off_thread(self._prepare_call, prompt)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
-        while True:
+        for _turn in range(_MAX_TOOL_TURNS):
             text_parts: list[str] = []
             final_text: str | None = None
             pending_calls: list[contracts.ToolCall] = []
@@ -279,6 +294,10 @@ class Agent:
                         "output": result.output,
                     }
                 )
+        else:
+            raise contracts.AlloyError(
+                f"tool-calling loop exceeded the max of {_MAX_TOOL_TURNS} turns"
+            )
 
         self._messages.append(contracts.Message(role="assistant", content=text))
         yield {"result": contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))}
@@ -324,17 +343,25 @@ class Agent:
         current_fingerprint = fingerprint(self._model, self._system_prompt, tool_schemas)
 
         try:
-            for version in project_client.agents.list_versions(self._name):
-                if version.metadata.get("alloy_fingerprint") == current_fingerprint:
-                    return
-        except Exception as list_error:  # any backend failure here just skips the dedup check
+            # Materializing the round trip here, not the `for` below, is what's genuinely
+            # a backend failure — a bug reading an already-listed version's own fields
+            # (e.g. malformed metadata) is a programming error and must not be swallowed
+            # into "backend unavailable" (see F2; B16 must keep passing honestly).
+            existing_versions = list(project_client.agents.list_versions(self._name))
+        except Exception as list_error:
             warnings.warn(
                 f"Could not list existing versions for agent {self._name!r}: {list_error}",
                 stacklevel=2,
             )
+        else:
+            for version in existing_versions:
+                if version.metadata.get("alloy_fingerprint") == current_fingerprint:
+                    return
 
         definition = _foundry.build_prompt_agent_definition(
-            model=self._model, instructions=self._system_prompt, tools=tool_schemas
+            model=self._model,
+            instructions=self._system_prompt,
+            tools=[*tool_schemas, *self._passthrough_tools],
         )
         try:
             project_client.agents.create_version(
