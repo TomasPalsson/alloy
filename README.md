@@ -157,11 +157,26 @@ curl http://127.0.0.1:8080/ping
 
 curl -X POST http://127.0.0.1:8080/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"prompt": "Who is on call for the data team?"}'
+  -d '{"prompt": "Is checkout-api healthy right now?"}'
 
 curl -N -X POST http://127.0.0.1:8080/invoke \
   -H 'Content-Type: application/json' \
-  -d '{"prompt": "Who is on call for the data team?", "stream": true}'
+  -d '{"prompt": "Is checkout-api healthy right now?", "stream": true}'
+```
+
+The streamed form emits one `data:` frame per event. A prompt that makes the model reach for
+the served agent's tool shows the whole loop:
+
+```
+data: {"current_tool_use": {"call_id": "call_bmNkh8OKgVnidyCVm1UJ2gYW", "name": "check_service_status"}}
+data: {"result": {"text": "No — checkout-api is currently degraded..."}}
+```
+
+and the agent's audit hook writes the matching pair to the server's stderr:
+
+```
+[audit] -> check_service_status({"service_name":"checkout-api"})
+[audit] <- check_service_status ok
 ```
 
 Binds `127.0.0.1` by default; pass `--host 0.0.0.0` to accept connections from other hosts (a
