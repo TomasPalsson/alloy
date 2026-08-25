@@ -14,6 +14,7 @@ import pytest
 from alloy import Agent, StreamingUnsupportedError
 from alloy._schema import tool
 from alloy.contracts import AgentResult, ToolCall
+from conftest import _StubConversations
 
 
 class _StubResponse:
@@ -97,16 +98,6 @@ class _StubDelayedStreamResponses:
 
     def create(self, *, stream: bool = False, **kwargs: Any) -> Any:
         return self._stream if stream else _StubResponse("unused")
-
-
-class _StubConversation:
-    def __init__(self, id: str) -> None:
-        self.id = id
-
-
-class _StubConversations:
-    def create(self, **kwargs: Any) -> _StubConversation:
-        return _StubConversation("conv_1")
 
 
 class _StubStreamingClient:

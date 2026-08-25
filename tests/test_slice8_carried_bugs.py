@@ -11,6 +11,7 @@ from alloy import Agent
 from alloy._loop import run_calls
 from alloy._schema import derive, tool
 from alloy.contracts import ToolCall
+from conftest import _StubConversations
 
 
 class _FunctionCallItem:
@@ -37,16 +38,6 @@ class _StubResponses:
     def create(self, **kwargs: Any) -> _StubResponse:
         self.calls.append(kwargs)
         return self._responses[len(self.calls) - 1]
-
-
-class _StubConversation:
-    def __init__(self, id: str) -> None:
-        self.id = id
-
-
-class _StubConversations:
-    def create(self, **kwargs: Any) -> _StubConversation:
-        return _StubConversation("conv_1")
 
 
 class _StubVersion:

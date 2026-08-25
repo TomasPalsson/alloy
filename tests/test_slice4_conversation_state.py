@@ -6,6 +6,7 @@ from typing import Any
 
 from alloy import Agent
 from alloy.contracts import Message
+from conftest import _StubConversations
 
 
 class _StubResponse:
@@ -21,16 +22,6 @@ class _StubResponses:
     def create(self, **kwargs: Any) -> _StubResponse:
         self.calls.append(kwargs)
         return _StubResponse(f"response-{len(self.calls)}")
-
-
-class _StubConversation:
-    def __init__(self, id: str) -> None:
-        self.id = id
-
-
-class _StubConversations:
-    def create(self, **kwargs: Any) -> _StubConversation:
-        return _StubConversation("conv_1")
 
 
 class _StubClient:
