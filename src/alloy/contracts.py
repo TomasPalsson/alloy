@@ -92,4 +92,5 @@ class AgentResult:
     tool_failures: tuple[Exception, ...] = field(default=())
 
     def __str__(self) -> str:
+        """Return the response text, so `print(result)` reads naturally."""
         return self.text
