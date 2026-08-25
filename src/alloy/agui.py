@@ -1,11 +1,12 @@
 """Translate one alloy `Agent` run into an AG-UI protocol event stream.
 
 Requires the `agui` extra. Importing this module without it fails loudly, so alloy's
-zero-dependency core never pulls in `ag-ui-protocol`/`pydantic` unless a caller opts in.
+zero-dependency core never pulls in `ag-ui-protocol` unless a caller opts in.
 
-Stub module: every function below raises `NotImplementedError`. Slices 2-9 fill these in
-against the exact signatures declared here — do not change a signature without updating
-every later slice.
+Most functions below still raise `NotImplementedError`: this slice implements only run
+bracketing (`run_stream`) and the import guard. Slices 2-9 fill in the rest, against the
+exact signatures declared here — do not change a signature without updating every later
+slice.
 """
 
 from __future__ import annotations
@@ -13,12 +14,15 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-import ag_ui.core as ag_ui_core
-
 if TYPE_CHECKING:
     from ._agent import Agent
 
 AGUI_EXTRA_HINT = "install the AG-UI extra: pip install 'alloy-foundry[agui]'"
+
+try:
+    import ag_ui.core as ag_ui_core
+except ImportError:
+    raise ImportError(AGUI_EXTRA_HINT) from None
 
 __all__ = [
     "AGUI_EXTRA_HINT",
@@ -101,9 +105,17 @@ async def run_stream(
     Yields:
         AG-UI events in wire order.
     """
-    raise NotImplementedError
-    yield  # pragma: no cover - unreachable; keeps this an async generator, matching the
-    # eventual implementation's calling convention rather than a plain coroutine's.
+    yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
+    try:
+        # ponytail: message history -> prompt translation is a later slice's job (see
+        # `seed_state`/`parse_run_input`, still NotImplementedError). This slice only
+        # brackets the run, so it drives the agent without inspecting what it streams back.
+        async for _event in agent.stream_async(""):
+            pass
+    except Exception as exc:
+        yield ag_ui_core.RunErrorEvent(message=str(exc))
+        return
+    yield ag_ui_core.RunFinishedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
 
 
 class ThreadStore:

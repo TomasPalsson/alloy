@@ -1,16 +1,14 @@
-"""Slice 1 RED: run bracketing (B1-B4) + packaging/isolation (B5-B7).
+"""Slice 1: run bracketing (B1-B4) + packaging/isolation (B5-B7).
 
-`alloy.agui` is a pure stub in this slice: every public function raises
-`NotImplementedError`, and the import guard does not exist yet (both land in GREEN).
-B1-B4 assert the run-bracketing behavior `run_stream` must eventually have and are
-expected to fail now, since the stub raises before yielding anything. B5-B7 assert
-packaging/isolation facts that do not depend on `run_stream`'s body.
+`alloy.agui` implements only `run_stream`'s bracketing and the import guard this slice;
+every other public function still raises `NotImplementedError` (later slices' job).
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import subprocess
 import sys
 import tomllib
@@ -126,16 +124,17 @@ def test_b5_import_without_extra_raises_actionable_import_error() -> None:
         importlib.import_module("alloy.agui")  # leave a clean import for later tests
 
 
-def test_b6_core_package_imports_without_ag_ui_or_pydantic() -> None:
-    # A subprocess, not sys.modules inspection in-process: this test file already
-    # imports ag_ui.core at module scope, which would poison an in-process check.
+def test_b6_core_package_imports_without_ag_ui() -> None:
+    # pydantic is NOT asserted here: azure-ai-projects -> openai -> pydantic means it has
+    # always been present in every alloy install, extra or not (AC-20 corrected for this).
+    # A subprocess, not sys.modules inspection in-process: this test file already imports
+    # ag_ui.core at module scope, which would poison an in-process check.
     script = (
         "import sys\n"
         "import alloy\n"
         "import alloy.hooks\n"
         "from alloy import Agent, tool\n"
         "assert 'ag_ui' not in sys.modules, sorted(sys.modules)\n"
-        "assert 'pydantic' not in sys.modules, sorted(sys.modules)\n"
         "print('OK')\n"
     )
     result = subprocess.run(
@@ -146,10 +145,11 @@ def test_b6_core_package_imports_without_ag_ui_or_pydantic() -> None:
     assert result.stdout.strip() == "OK"
 
 
-def test_b7_pyproject_declares_agui_extra_and_keeps_base_deps_clean() -> None:
+def test_b7_pyproject_declares_agui_extra_and_base_deps_are_exact() -> None:
     data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
 
     assert "agui" in data["project"]["optional-dependencies"]
-    base_deps = data["project"]["dependencies"]
-    assert not any("ag-ui-protocol" in dep for dep in base_deps)
-    assert not any("pydantic" in dep for dep in base_deps)
+    base_dep_names = {
+        re.split(r"[<>=!~\s]", dep, maxsplit=1)[0] for dep in data["project"]["dependencies"]
+    }
+    assert base_dep_names == {"azure-ai-projects", "azure-identity"}
