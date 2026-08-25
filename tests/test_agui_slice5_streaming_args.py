@@ -2,26 +2,26 @@
 
 Azure streams a tool call's arguments as raw JSON fragments across many
 `response.function_call_arguments.delta` events, not as one blob - see spec Appendix D's
-live-measured 13 deltas for a two-argument tool. `_loop.extract_tool_argument_delta` pulls
-`(call_id, delta)` off one such raw event; `Agent.stream_async` threads it through as a new
-`{"tool_arguments_delta": (call_id, delta)}` shape (code-design.md Sec 9, pinned so this
-slice cannot invent a second key for it).
+live-measured 13 deltas for a two-argument tool. Two extractors in `_loop.py` split the work:
 
-Ordering chosen for `run_stream`: buffer each call's deltas by `call_id` as they arrive,
-and flush them as TOOL_CALL_ARGS only once that call's COMPLETE `ToolCall` shows up via the
-unchanged `{"current_tool_use": ...}` shape - the same point slice 4 already opens
-TOOL_CALL_START from. Two things force this, not a coin flip:
+- `extract_tool_call_start` reads `response.output_item.added` where `item.type ==
+  "function_call"` and returns a `ToolCall` with empty `arguments` - Azure knows the tool's
+  NAME before any argument fragment arrives, which is what lets `TOOL_CALL_START` open early
+  instead of waiting for the complete call. The same raw event type also carries `reasoning`
+  and `message` items, so the `function_call` filter is load-bearing, not decoration.
+- `extract_tool_argument_delta` reads `response.function_call_arguments.delta` and returns
+  `(item_id, delta)` - `item_id`, NOT `call_id`: verified live, this event carries only
+  `delta`, `item_id`, `output_index`, `sequence_number`, `type`. `item_id` and the owning
+  call's `call_id` are DIFFERENT values on the wire (e.g. `fc_...` vs `call_...`); resolving
+  one to the other is `Agent.stream_async`'s job, using the mapping the `.added` event
+  supplies. A delta whose `item_id` has no known mapping is dropped, not invented into a
+  fabricated call.
 
-1. AG-UI's TOOL_CALL_START carries `tool_call_name` up front, with no later "rename" event.
-   alloy's own stream never knows a tool's name before the COMPLETE ToolCall arrives (see
-   slice 4's B16, which pins TOOL_CALL_START.tool_call_name to that exact value) - so no
-   earlier moment can legally open the bracket a delta's TOOL_CALL_ARGS would need to sit in.
-2. AC-13 only requires more than one TOOL_CALL_ARGS whose deltas concatenate to the whole
-   argument JSON - it does not require wire-clock realtime delivery relative to other run
-   events. Buffer-then-flush satisfies the letter of AC-13 while satisfying conformance
-   rule 6 (TOOL_CALL_ARGS needs an already-open TOOL_CALL_START) and leaving
-   `current_tool_use`'s meaning - a COMPLETE tool call, is what TOOL_CALL_END is emitted
-   from - exactly as slice 4 left it.
+`run_stream` (agui.py) brackets tool calls two ways depending on what it's fed: a call whose
+START already went out via `tool_call_started` gets `TOOL_CALL_ARGS` streamed live, then
+`current_tool_use` closes it with `TOOL_CALL_END` alone. A call delivered with no preceding
+`tool_call_started` (the pre-slice-5 shape, still exercised by slice 4's own tests) still
+gets its whole bracket - START/ARGS/END - from `current_tool_use` in one step, unchanged.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import pytest
 
 import alloy.agui as agui
 from alloy import Agent
-from alloy._loop import extract_tool_argument_delta
+from alloy._loop import extract_tool_argument_delta, extract_tool_call_start
 from alloy._schema import tool
 from alloy.contracts import AgentResult, StreamEvent, ToolCall, ToolResult
 from alloy.hooks import AfterToolCallEvent, HookRegistry
@@ -62,36 +62,11 @@ _ARGUMENT_FRAGMENTS = [
 ]
 _FULL_ARGUMENTS_JSON = "".join(_ARGUMENT_FRAGMENTS)
 
-
-# --- extract_tool_argument_delta: raw-event stubs ---------------------------------------
-
-
-class _RawEvent:
-    """A minimal raw-event stub carrying only `.type`.
-
-    `extract_tool_argument_delta` must decide "is this mine?" from `.type` alone before
-    touching any other attribute, exactly as `extract_tool_call_from_stream_item` already
-    does (`getattr(raw_event, "type", None)`) - so Appendix D's other ten raw types need
-    nothing more than a type tag to prove this extractor ignores them.
-    """
-
-    def __init__(self, type_: str) -> None:
-        self.type = type_
-
-
-class _RawArgsDeltaEvent:
-    # Mirrors the real event: verified against live Azure it carries item_id and NOT
-    # call_id. A stub with call_id would let a broken extractor pass.
-    def __init__(self, item_id: str, delta: str) -> None:
-        self.type = "response.function_call_arguments.delta"
-        self.item_id = item_id
-        self.delta = delta
-
-
-# Every Appendix D raw type except the one this extractor handles.
-_OTHER_APPENDIX_D_RAW_TYPES = [
+_ALL_APPENDIX_D_RAW_TYPES = [
     "response.created",
     "response.in_progress",
+    "response.output_item.added",
+    "response.function_call_arguments.delta",
     "response.function_call_arguments.done",
     "response.output_item.done",
     "response.content_part.added",
@@ -102,7 +77,110 @@ _OTHER_APPENDIX_D_RAW_TYPES = [
 ]
 
 
-@pytest.mark.parametrize("raw_type", _OTHER_APPENDIX_D_RAW_TYPES)
+def _other_appendix_d_types(target: str) -> list[str]:
+    return [t for t in _ALL_APPENDIX_D_RAW_TYPES if t != target]
+
+
+# --- raw-event stubs, shared by both extractors' tests -----------------------------------
+
+
+class _RawEvent:
+    """A minimal raw-event stub carrying only `.type`.
+
+    Both extractors must decide "is this mine?" from `.type` alone before touching any
+    other attribute, exactly as `extract_tool_call_from_stream_item` already does
+    (`getattr(raw_event, "type", None)`) - so every other Appendix D raw type needs nothing
+    more than a type tag to prove an extractor ignores it.
+    """
+
+    def __init__(self, type_: str) -> None:
+        self.type = type_
+
+
+class _RawArgsDeltaEvent:
+    def __init__(self, item_id: str, delta: str) -> None:
+        self.type = "response.function_call_arguments.delta"
+        self.item_id = item_id
+        self.delta = delta
+
+
+class _RawFunctionCallItem:
+    def __init__(
+        self, call_id: str, name: str, arguments: str, item_id: str = "fc_default"
+    ) -> None:
+        self.type = "function_call"
+        self.call_id = call_id
+        self.name = name
+        self.arguments = arguments
+        self.id = item_id
+
+
+class _RawNonFunctionCallItem:
+    def __init__(self, type_: str) -> None:
+        self.type = type_
+
+
+class _RawOutputItemAddedEvent:
+    def __init__(self, item: Any) -> None:
+        self.type = "response.output_item.added"
+        self.item = item
+
+
+class _RawOutputItemDoneEvent:
+    def __init__(self, item: Any) -> None:
+        self.type = "response.output_item.done"
+        self.item = item
+
+
+# --- extract_tool_call_start --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw_type", _other_appendix_d_types("response.output_item.added"))
+def test_extract_tool_call_start_returns_none_for_every_other_appendix_d_type(
+    raw_type: str,
+) -> None:
+    assert extract_tool_call_start(_RawEvent(raw_type)) is None
+
+
+def test_extract_tool_call_start_returns_none_for_event_with_no_type_attribute() -> None:
+    assert extract_tool_call_start(object()) is None
+
+
+@pytest.mark.parametrize("item_type", ["reasoning", "message"])
+def test_extract_tool_call_start_returns_none_for_non_function_call_items(
+    item_type: str,
+) -> None:
+    # output_item.added also carries reasoning and message items - the Appendix D landmine:
+    # filtering on the outer event.type alone, without also checking item.type, would map
+    # the wrong item's id to a tool call.
+    event = _RawOutputItemAddedEvent(_RawNonFunctionCallItem(item_type))
+    assert extract_tool_call_start(event) is None
+
+
+def test_extract_tool_call_start_returns_a_tool_call_with_empty_arguments() -> None:
+    # `arguments="already here"` on the raw item proves the extractor ignores it - Azure's
+    # own item.arguments is "" at this point anyway, but nothing should rely on that.
+    item = _RawFunctionCallItem(
+        call_id="call_RzvvHEgpiYHGC4TUFSn2PDnd",
+        name="get_weather",
+        arguments="already here",
+        item_id="fc_a3a1691637524080006a8daa0314088190b90b0b91a40086e3",
+    )
+    event = _RawOutputItemAddedEvent(item)
+
+    result = extract_tool_call_start(event)
+
+    assert result == ToolCall(
+        call_id="call_RzvvHEgpiYHGC4TUFSn2PDnd", name="get_weather", arguments=""
+    )
+
+
+# --- extract_tool_argument_delta ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_type", _other_appendix_d_types("response.function_call_arguments.delta")
+)
 def test_extract_tool_argument_delta_returns_none_for_every_other_appendix_d_type(
     raw_type: str,
 ) -> None:
@@ -114,17 +192,9 @@ def test_extract_tool_argument_delta_returns_none_for_event_with_no_type_attribu
 
 
 def test_extract_tool_argument_delta_reads_item_id_and_delta_off_the_matching_event() -> None:
-    event = _RawArgsDeltaEvent(item_id="fc_abc", delta='{"')
-    assert extract_tool_argument_delta(event) == ("fc_abc", '{"')
-
-
-def test_extract_tool_argument_delta_returns_item_id_since_call_id_is_absent() -> None:
-    # Live Azure sends only ('delta', 'item_id', 'output_index', 'sequence_number', 'type').
-    # An extractor reading call_id would return None forever and the feature would degrade
-    # to one batched chunk with no error at all.
-    event = _RawArgsDeltaEvent(item_id="fc_abc", delta="x")
-    assert not hasattr(event, "call_id")
-    assert extract_tool_argument_delta(event) == ("fc_abc", "x")
+    # item_id, NOT call_id: verified live, this event carries no call_id field at all.
+    event = _RawArgsDeltaEvent(item_id="fc_a3a1", delta='{"')
+    assert extract_tool_argument_delta(event) == ("fc_a3a1", '{"')
 
 
 @pytest.mark.parametrize("fragment", _ARGUMENT_FRAGMENTS)
@@ -133,11 +203,11 @@ def test_extract_tool_argument_delta_passes_every_appendix_d_fragment_through_un
 ) -> None:
     # Each fragment round-trips byte-for-byte - the extractor must not trim, strip, or
     # otherwise "clean up" a delta that (correctly) isn't valid JSON on its own.
-    event = _RawArgsDeltaEvent(item_id="fc_weather", delta=fragment)
-    assert extract_tool_argument_delta(event) == ("fc_weather", fragment)
+    event = _RawArgsDeltaEvent(item_id="fc_a3a1", delta=fragment)
+    assert extract_tool_argument_delta(event) == ("fc_a3a1", fragment)
 
 
-# --- B22: a single delta need not be valid JSON; only the concatenation is --------------
+# --- B22: a single delta need not be valid JSON; only the concatenation is ---------------
 
 
 def test_b22_a_single_delta_is_not_required_to_be_valid_json() -> None:
@@ -215,17 +285,14 @@ async def _collect(
 
 def test_b21_thirteen_real_fragments_yield_more_than_one_tool_call_args_that_concatenate() -> None:
     fake = _FakeAgentWithHooks()
-    call = ToolCall(call_id="call-1", name="get_weather", arguments=_FULL_ARGUMENTS_JSON)
+    started = ToolCall(call_id="call-1", name="get_weather", arguments="")
+    complete_call = ToolCall(call_id="call-1", name="get_weather", arguments=_FULL_ARGUMENTS_JSON)
     result = ToolResult(call_id="call-1", output=json.dumps({"temp": 5}))
     fake.steps = [
-        # Azure names the tool at output_item.added, BEFORE any fragment, which is what
-        # lets TOOL_CALL_START open the bracket the fragments then stream into. Buffering
-        # them until the call completes would flush all 13 at one instant and render as
-        # one blob — the behaviour this slice exists to replace.
-        {"tool_call_started": ToolCall(call_id="call-1", name="get_weather", arguments="")},
+        {"tool_call_started": started},
         *({"tool_arguments_delta": ("call-1", fragment)} for fragment in _ARGUMENT_FRAGMENTS),
-        {"current_tool_use": call},
-        AfterToolCallEvent(agent=cast(Agent, fake), tool_use=call, result=result),
+        {"current_tool_use": complete_call},
+        AfterToolCallEvent(agent=cast(Agent, fake), tool_use=complete_call, result=result),
         {"result": AgentResult(text="it is 5 degrees in Reykjavik")},
     ]
     run_input = _run_input(messages=[_user_message("weather in Reykjavik, celsius please")])
@@ -239,23 +306,22 @@ def test_b21_thirteen_real_fragments_yield_more_than_one_tool_call_args_that_con
     # Appendix D's exact measured count for this tool call, not just "more than one".
     assert len(args) == 13
     assert len(ends) == 1
+    assert starts[0].tool_call_id == "call-1"
+    assert starts[0].tool_call_name == "get_weather"
     assert all(a.tool_call_id == "call-1" for a in args)
     assert [a.delta for a in args] == _ARGUMENT_FRAGMENTS
     assert "".join(a.delta for a in args) == '{"city":"Reykjavik","unit":"celsius"}'
+    assert ends[0].tool_call_id == "call-1"
 
     start_idx = events.index(starts[0])
     end_idx = events.index(ends[0])
     args_indices = [events.index(a) for a in args]
     assert start_idx < min(args_indices)
     assert max(args_indices) < end_idx
-    # The completing event must only CLOSE the bracket; re-emitting ARGS there would
-    # repeat the whole payload after the fragments that already carried it.
-    assert len(args) == len(_ARGUMENT_FRAGMENTS)
     agui.check_conformance(events)
 
 
-# --- B23: REGRESSION - stream_async's existing shapes are unchanged when no argument ----
-# --- deltas occur, driven through the REAL Agent.stream_async (not the agui fake) -------
+# --- item_id -> call_id resolution, through the REAL Agent.stream_async ------------------
 
 
 class _RawDeltaEvent:
@@ -275,21 +341,7 @@ class _RawCompletedEvent:
         self.type = "response.completed"
 
 
-class _RawFunctionCallItem:
-    def __init__(self, call_id: str, name: str, arguments: str) -> None:
-        self.type = "function_call"
-        self.call_id = call_id
-        self.name = name
-        self.arguments = arguments
-
-
-class _RawOutputItemDoneEvent:
-    def __init__(self, item: Any) -> None:
-        self.type = "response.output_item.done"
-        self.item = item
-
-
-class _StubStream:
+class _RawStream:
     def __init__(self, events: list[Any]) -> None:
         self._events = events
 
@@ -307,7 +359,7 @@ class _StubStreamingResponses:
     def create(self, *, stream: bool = False, **kwargs: Any) -> Any:
         events = self._turns[self._call_count]
         self._call_count += 1
-        return _StubStream(events)
+        return _RawStream(events)
 
 
 class _StubStreamingClient:
@@ -316,9 +368,83 @@ class _StubStreamingClient:
         self.conversations = StubConversations()
 
 
+async def test_tool_arguments_delta_resolves_item_id_to_the_tool_calls_call_id() -> None:
+    # Mirrors the live probe: item.id ('fc_...') and item.call_id ('call_...') are DIFFERENT
+    # values on Azure's wire. A delta event carries only item_id, so stream_async must
+    # resolve it back to call_id using the output_item.added event seen earlier for that item.
+    call_id = "call_RzvvHEgpiYHGC4TUFSn2PDnd"
+    item_id = "fc_a3a1691637524080006a8daa0314088190b90b0b91a40086e3"
+    call_item = _RawFunctionCallItem(
+        call_id=call_id, name="get_weather", arguments=_FULL_ARGUMENTS_JSON, item_id=item_id
+    )
+    first_turn = [
+        _RawOutputItemAddedEvent(call_item),
+        *(_RawArgsDeltaEvent(item_id=item_id, delta=fragment) for fragment in _ARGUMENT_FRAGMENTS),
+        _RawOutputItemDoneEvent(call_item),
+        _RawCompletedEvent(),
+    ]
+    second_turn = [
+        _RawDeltaEvent("it is 5 degrees"),
+        _RawTextDoneEvent("it is 5 degrees"),
+        _RawCompletedEvent(),
+    ]
+
+    @tool
+    def get_weather(city: str, unit: str) -> str:
+        """Get the weather for a city.
+
+        Args:
+            city: The city name.
+            unit: The unit to report the temperature in.
+        """
+        return "5 degrees"
+
+    client = _StubStreamingClient(_StubStreamingResponses(turns=[first_turn, second_turn]))
+    agent = Agent(model="gpt-4o", tools=[get_weather], client=client)
+
+    events = [e async for e in agent.stream_async("weather in Reykjavik, celsius please")]
+
+    started = [e["tool_call_started"] for e in events if "tool_call_started" in e]
+    deltas = [e["tool_arguments_delta"] for e in events if "tool_arguments_delta" in e]
+    completed = [e["current_tool_use"] for e in events if "current_tool_use" in e]
+
+    assert len(started) == 1
+    assert started[0] == ToolCall(call_id=call_id, name="get_weather", arguments="")
+
+    assert len(deltas) == 13
+    # Every delta carries the RESOLVED call id - never the raw item id straight off the wire.
+    assert all(resolved_id == call_id for resolved_id, _ in deltas)
+    assert [fragment for _, fragment in deltas] == _ARGUMENT_FRAGMENTS
+
+    assert len(completed) == 1
+    assert completed[0].call_id == call_id
+    assert completed[0].arguments == _FULL_ARGUMENTS_JSON
+
+
+async def test_argument_delta_with_no_matching_start_event_is_dropped_not_invented() -> None:
+    # No output_item.added precedes this delta - stream_async must not fabricate a call_id
+    # for a fragment it cannot attribute; a wrongly-attributed fragment corrupts that call's
+    # arguments silently, which is worse than dropping it.
+    first_turn = [
+        _RawArgsDeltaEvent(item_id="fc_orphan", delta='{"'),
+        _RawCompletedEvent(),
+    ]
+    client = _StubStreamingClient(_StubStreamingResponses(turns=[first_turn]))
+    agent = Agent(model="gpt-4o", client=client)
+
+    events = [e async for e in agent.stream_async("hi")]
+
+    assert not any("tool_arguments_delta" in e for e in events)
+
+
+# --- B23: REGRESSION - stream_async's existing shapes are unchanged when no output_item -
+# --- .added / argument-delta events occur, driven through the REAL Agent.stream_async ---
+
+
 async def test_b23_stream_async_existing_shapes_unchanged_when_no_argument_deltas_occur() -> None:
     # A raw stream built exactly like Azure's OLD (pre-slice-5) tool-calling shape: no
-    # response.function_call_arguments.delta events anywhere, only output_item.done.
+    # output_item.added and no response.function_call_arguments.delta events anywhere, only
+    # output_item.done - as if a caller (or an older Azure API) never emitted the new events.
     call_item = _RawFunctionCallItem(
         call_id="call_1", name="get_oncall", arguments='{"team": "data"}'
     )
@@ -344,8 +470,9 @@ async def test_b23_stream_async_existing_shapes_unchanged_when_no_argument_delta
     events = [e async for e in agent.stream_async("who is on call for data?")]
     event_kinds = {next(iter(e)) for e in events}
 
-    # A non-AG-UI caller sees exactly the three shapes it saw before this slice - never the
-    # new "tool_arguments_delta" key, since this raw stream carries no delta events at all.
+    # A non-AG-UI caller sees exactly the three shapes it saw before this slice - never
+    # "tool_call_started" or "tool_arguments_delta", since this raw stream carries neither
+    # of the raw events those come from.
     assert event_kinds == {"data", "current_tool_use", "result"}
 
     tool_use_index = next(i for i, e in enumerate(events) if "current_tool_use" in e)
