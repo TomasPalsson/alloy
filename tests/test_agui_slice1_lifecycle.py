@@ -23,6 +23,7 @@ import pytest
 import alloy.agui as agui
 from alloy import Agent
 from alloy.contracts import AgentResult, StreamEvent
+from alloy.hooks import HookRegistry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,6 +36,9 @@ class _FakeAgent:
     ) -> None:
         self._events = events if events is not None else []
         self._fail = fail
+        # A real Agent always exposes .hooks; run_stream registers on it unconditionally
+        # since slice 4, so a stand-in needs one too, not just the fakes that use it.
+        self.hooks = HookRegistry()
 
     async def stream_async(self, prompt: str) -> AsyncIterator[StreamEvent]:
         if self._fail is not None:

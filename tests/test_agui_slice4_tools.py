@@ -253,6 +253,37 @@ def test_b20_calling_run_stream_twice_does_not_double_tool_call_result() -> None
     agui.check_conformance(second_events)
 
 
+# --- the last turn's result must survive when nothing follows the hook firing -----------
+
+
+def test_last_turns_tool_call_result_survives_when_no_further_event_follows() -> None:
+    # A real Agent always yields a final {"result": ...} after its last turn's tool calls,
+    # so a drain sitting only at the top of each loop iteration would happen to catch it in
+    # practice. This fake's script ends right after the hook fires - nothing follows - to
+    # isolate that: without a drain placed AFTER the loop too, this result is silently
+    # dropped instead of reaching the wire before RUN_FINISHED.
+    fake = _FakeAgentWithHooks()
+    call = ToolCall(call_id="call-last", name="get_weather", arguments='{"city": "Reykjavik"}')
+    result = ToolResult(call_id="call-last", output=json.dumps({"temp": 5}))
+    fake.steps = [
+        {"current_tool_use": call},
+        AfterToolCallEvent(agent=cast(Agent, fake), tool_use=call, result=result),
+    ]
+    run_input = _run_input(messages=[_user_message("weather please")])
+
+    events = asyncio.run(_collect(fake, run_input))
+
+    tool_results = [e for e in events if isinstance(e, ag_ui_core.ToolCallResultEvent)]
+    assert len(tool_results) == 1
+    assert tool_results[0].tool_call_id == "call-last"
+    result_idx = events.index(tool_results[0])
+    finished_idx = next(
+        i for i, e in enumerate(events) if isinstance(e, ag_ui_core.RunFinishedEvent)
+    )
+    assert result_idx < finished_idx
+    agui.check_conformance(events)
+
+
 # --- B49: text, then a tool call, then more text - END precedes START, new message_id ---
 
 

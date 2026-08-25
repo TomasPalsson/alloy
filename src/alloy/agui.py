@@ -33,8 +33,11 @@ and tool calls looks legal under rules 1-7 alone and is still refused by a real 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
+
+from . import contracts
+from .hooks import AfterToolCallEvent
 
 if TYPE_CHECKING:
     from ._agent import Agent
@@ -272,6 +275,15 @@ def latest_user_prompt(run_input: ag_ui_core.RunAgentInput) -> str:
     raise ValueError("no user message in run_input.messages")
 
 
+def _tool_result_event(
+    tool_call_id: str, result: contracts.ToolResult
+) -> ag_ui_core.ToolCallResultEvent:
+    """Build one TOOL_CALL_RESULT, minting a fresh message_id (AC-09)."""
+    return ag_ui_core.ToolCallResultEvent(
+        message_id=uuid4().hex, tool_call_id=tool_call_id, content=result.output
+    )
+
+
 async def run_stream(
     agent: Agent, run_input: ag_ui_core.RunAgentInput
 ) -> AsyncIterator[ag_ui_core.BaseEvent]:
@@ -279,6 +291,11 @@ async def run_stream(
 
     Every run is bracketed: `RunStartedEvent` first, then exactly one of
     `RunFinishedEvent`/`RunErrorEvent` last. Nothing follows the closing event.
+
+    Tool calls bracket as TOOL_CALL_START/ARGS/END sharing the alloy `ToolCall.call_id`
+    verbatim; an open text message closes first (rule 8). Results aren't on alloy's own
+    stream (FR-06), so this registers on `agent.hooks` for the run and removes it in a
+    `finally` - two calls on one agent must not double-emit a stale run's results.
 
     Args:
         agent: An already-built alloy agent, scoped to the right conversation.
@@ -289,9 +306,39 @@ async def run_stream(
     """
     yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
     message_id: str | None = None
+    # Populated by _record_result, which fires on agent.hooks - possibly nested inside
+    # agent.stream_async's own frame, never inside this generator's own body, so it can't
+    # yield. Drained (and cleared) at every point below that could otherwise let a result
+    # go unreported: before handling each new stream event, after the loop, and on error.
+    pending_results: list[tuple[str, contracts.ToolResult]] = []
+
+    def _record_result(event: AfterToolCallEvent) -> None:
+        pending_results.append((event.tool_use.call_id, event.result))
+
+    def _drain() -> list[tuple[str, contracts.ToolResult]]:
+        drained = list(pending_results)
+        pending_results.clear()
+        return drained
+
+    agent.hooks.add_callback(AfterToolCallEvent, _record_result)
     try:
         prompt = latest_user_prompt(run_input)
         async for event in agent.stream_async(prompt):
+            for tool_call_id, result in _drain():
+                yield _tool_result_event(tool_call_id, result)
+
+            if "current_tool_use" in event:
+                call = cast(contracts.ToolCall, event["current_tool_use"])
+                if message_id is not None:
+                    yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
+                    message_id = None
+                yield ag_ui_core.ToolCallStartEvent(
+                    tool_call_id=call.call_id, tool_call_name=call.name
+                )
+                yield ag_ui_core.ToolCallArgsEvent(tool_call_id=call.call_id, delta=call.arguments)
+                yield ag_ui_core.ToolCallEndEvent(tool_call_id=call.call_id)
+                continue
+
             if "data" not in event:
                 continue
             if message_id is None:
@@ -299,10 +346,16 @@ async def run_stream(
                 yield ag_ui_core.TextMessageStartEvent(message_id=message_id)
             yield ag_ui_core.TextMessageContentEvent(message_id=message_id, delta=event["data"])
     except Exception as exc:
+        for tool_call_id, result in _drain():
+            yield _tool_result_event(tool_call_id, result)
         if message_id is not None:
             yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
         yield ag_ui_core.RunErrorEvent(message=str(exc))
         return
+    finally:
+        agent.hooks.remove_callback(AfterToolCallEvent, _record_result)
+    for tool_call_id, result in _drain():
+        yield _tool_result_event(tool_call_id, result)
     if message_id is not None:
         yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
     yield ag_ui_core.RunFinishedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
