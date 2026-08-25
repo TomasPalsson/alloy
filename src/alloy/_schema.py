@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import inspect
 import re
-import typing
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_type_hints
 
 from .contracts import JsonSchema, ToolSchemaError, ToolSpec
 
@@ -29,7 +28,7 @@ def derive(fn: Callable[..., Any]) -> ToolSpec:
     signature = inspect.signature(fn)
     # `get_type_hints` resolves `from __future__ import annotations` string annotations
     # back to real types; `param.annotation` alone would stay a string in that case.
-    resolved_annotations = typing.get_type_hints(fn)
+    resolved_annotations = get_type_hints(fn)
     summary, arg_descriptions = _parse_google_docstring(inspect.getdoc(fn) or "")
 
     properties: dict[str, Any] = {}
