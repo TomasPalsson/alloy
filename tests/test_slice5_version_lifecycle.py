@@ -101,6 +101,9 @@ def test_b15_changed_system_prompt_creates_exactly_one_new_version() -> None:
     assert len(agents.create_calls) == 1
     new_fingerprint = fingerprint("gpt-4o", "new system prompt", [])
     assert agents.create_calls[0]["metadata"]["alloy_fingerprint"] == new_fingerprint
+    definition = agents.create_calls[0]["definition"]
+    assert definition.instructions == "new system prompt"
+    assert not hasattr(definition, "system_prompt")
 
 
 def test_b16_listing_failure_still_creates_version_and_warns() -> None:
@@ -132,3 +135,19 @@ def test_b17_version_cap_reached_raises_version_cap_error_with_cause() -> None:
     assert "weather-agent" in str(error)
     assert "5" in str(error)
     assert error.__cause__ is original_error
+
+
+def test_b17_programming_error_during_create_version_is_not_swallowed_as_version_cap() -> None:
+    """The live bug: an `AttributeError` from a broken call must surface as itself, not
+    get reported to the user as a misleading version-cap error."""
+    original_error = AttributeError("'OpenAI' object has no attribute 'agents'")
+    agents = _StubAgentsOperations(create_version_error=original_error)
+    client = _StubClient(agents=agents)
+    agent = Agent(
+        model="gpt-4o", system_prompt="You are helpful.", name="weather-agent", client=client
+    )
+
+    with pytest.raises(AttributeError) as exc_info:
+        agent("hi")
+
+    assert exc_info.value is original_error

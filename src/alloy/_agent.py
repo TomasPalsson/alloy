@@ -69,6 +69,9 @@ class Agent:
         self._endpoint = endpoint
         self._credential = credential
         self._client = client
+        # Same object as `_client` when injected (a test stub may expose `.agents` on it
+        # too); the real path below replaces this with the actual AIProjectClient.
+        self._project_client = client
         self._messages: list[contracts.Message] = []
         self._conversation_id: str | None = None
 
@@ -89,14 +92,16 @@ class Agent:
             prompt: The user prompt to send.
         """
         if self._client is None:
-            self._client = _foundry.FoundryClient(
+            foundry_client = _foundry.FoundryClient(
                 endpoint=self._endpoint, credential=self._credential
-            ).get_openai_client(agent_name=self._name)
+            )
+            self._project_client = foundry_client.project
+            self._client = foundry_client.get_openai_client(agent_name=self._name)
         client = cast(Any, self._client)
 
         # Version tracking needs an agent_name on the backend, so it's opt-in via name=.
         if self._name is not None:
-            self._ensure_version(client)
+            self._ensure_version()
 
         # Conversation is created lazily on first call so __init__ stays call-free (see B2).
         # It's the service's id, never a locally invented one — the Responses API's
@@ -287,13 +292,15 @@ class Agent:
         conversation, and records the prompt.
         """
         if self._client is None:
-            self._client = _foundry.FoundryClient(
+            foundry_client = _foundry.FoundryClient(
                 endpoint=self._endpoint, credential=self._credential
-            ).get_openai_client(agent_name=self._name)
+            )
+            self._project_client = foundry_client.project
+            self._client = foundry_client.get_openai_client(agent_name=self._name)
         client = cast(Any, self._client)
 
         if self._name is not None:
-            self._ensure_version(client)
+            self._ensure_version()
 
         if self._conversation_id is None:
             self._conversation_id = _foundry.create_conversation(client)
@@ -301,12 +308,17 @@ class Agent:
         self._messages.append(contracts.Message(role="user", content=prompt))
         return client
 
-    def _ensure_version(self, client: Any) -> None:
+    def _ensure_version(self) -> None:
         """Create a backend version for the current config, unless one already matches.
+
+        Version work is control-plane (`AIProjectClient.agents.*`), so it runs against
+        `self._project_client`, never the openai data-plane client (see the two-client
+        split in `_foundry.py`).
 
         See B14 (matched fingerprint, no-op), B15 (changed prompt, one new version),
         B16 (listing fails, still create and warn), B17 (creation fails, cap reached).
         """
+        project_client = cast(Any, self._project_client)
         tool_schemas = [
             {"name": spec.name, "description": spec.description, "parameters": spec.parameters}
             for spec in self._tool_specs
@@ -314,7 +326,7 @@ class Agent:
         current_fingerprint = fingerprint(self._model, self._system_prompt, tool_schemas)
 
         try:
-            for version in client.agents.list_versions(self._name):
+            for version in project_client.agents.list_versions(self._name):
                 if version.metadata.get("alloy_fingerprint") == current_fingerprint:
                     return
         except Exception as list_error:  # any backend failure here just skips the dedup check
@@ -323,18 +335,19 @@ class Agent:
                 stacklevel=2,
             )
 
-        definition = {
-            "model": self._model,
-            "system_prompt": self._system_prompt,
-            "tools": tool_schemas,
-        }
+        definition = _foundry.build_prompt_agent_definition(
+            model=self._model, instructions=self._system_prompt, tools=tool_schemas
+        )
         try:
-            client.agents.create_version(
+            project_client.agents.create_version(
                 self._name,
                 definition=definition,
                 metadata={"alloy_fingerprint": current_fingerprint},
             )
-        except Exception as create_error:  # re-raised below as the domain-specific cap error
-            raise contracts.VersionCapError(
-                f"Agent {self._name!r} cannot create a new version: {create_error}"
-            ) from create_error
+        except Exception as create_error:
+            mapped_error = _foundry.map_version_creation_error(
+                create_error, agent_name=cast(str, self._name)
+            )
+            if mapped_error is not None:
+                raise mapped_error from create_error
+            raise

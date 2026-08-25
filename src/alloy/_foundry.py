@@ -14,11 +14,12 @@ import os
 from typing import Any, cast
 
 from azure.ai.projects import AIProjectClient
+from azure.ai.projects.models import PromptAgentDefinition
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 from azure.identity import DefaultAzureCredential
 from openai import AuthenticationError as OpenAIAuthenticationError
 
-from .contracts import AlloyError, BackendAuthError, StreamingUnsupportedError
+from .contracts import AlloyError, BackendAuthError, StreamingUnsupportedError, VersionCapError
 
 _ENDPOINT_ENV_VAR = "AZURE_AI_PROJECT_ENDPOINT"
 _REAUTH_MESSAGE = (
@@ -53,6 +54,11 @@ class FoundryClient:
             )
         except (ClientAuthenticationError, OpenAIAuthenticationError) as exc:
             raise BackendAuthError(_REAUTH_MESSAGE) from exc
+
+    @property
+    def project(self) -> Any:
+        """The `AIProjectClient` itself — the control plane, for `.agents.*` calls."""
+        return self._project_client
 
     def get_openai_client(self, *, agent_name: str | None = None) -> Any:
         """Return a real `openai` client scoped to this project (and agent, if named)."""
@@ -89,6 +95,39 @@ def open_stream(client: Any, **create_kwargs: Any) -> Any:
         return client.responses.create(**create_kwargs, stream=True)
     except TypeError as exc:
         raise StreamingUnsupportedError(f"backend does not support streaming: {exc}") from exc
+
+
+def build_prompt_agent_definition(
+    *, model: str, instructions: str, tools: list[dict[str, Any]]
+) -> Any:
+    """Build the real SDK agent definition (`_agent.py` may not import azure.* to do this).
+
+    Maps alloy's `system_prompt` onto the SDK's `instructions` field — the field is named
+    `system_prompt` nowhere in `PromptAgentDefinition`.
+    """
+    # alloy's tool schemas are plain JSON-Schema dicts, not typed `Tool` subclasses — the
+    # SDK model accepts them at runtime; `cast` only satisfies the type checker.
+    return PromptAgentDefinition(model=model, instructions=instructions, tools=cast(Any, tools))
+
+
+def map_version_creation_error(error: Exception, *, agent_name: str) -> Exception | None:
+    """Classify a `client.agents.create_version` failure.
+
+    Returns the `AlloyError` to raise in its place, or `None` if `error` should propagate
+    unchanged — a programming error (e.g. `AttributeError`) must never be swallowed into a
+    domain error (see B17's honest counterpart: not every failure is a version cap).
+    """
+    if isinstance(error, (ClientAuthenticationError, OpenAIAuthenticationError)):
+        return BackendAuthError(_REAUTH_MESSAGE)
+    if isinstance(error, HttpResponseError):
+        code = (getattr(getattr(error, "error", None), "code", None) or "").lower()
+        if error.status_code == 429 or "quota" in code or "cap" in code:
+            return VersionCapError(f"Agent {agent_name!r} cannot create a new version: {error}")
+        return AlloyError(f"Foundry rejected the version request for agent {agent_name!r}: {error}")
+    text = str(error).lower()
+    if "cap" in text or "quota" in text:
+        return VersionCapError(f"Agent {agent_name!r} cannot create a new version: {error}")
+    return None
 
 
 def create_conversation(client: Any) -> str:
