@@ -22,7 +22,6 @@ from alloy.hooks import (
 )
 from conftest import StubConversations
 
-
 # --- stubs for __call__/invoke_async, matching tests/test_slice3_tool_loop.py exactly ---
 
 
