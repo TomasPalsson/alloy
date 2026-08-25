@@ -108,7 +108,7 @@ class Agent:
             prompt: The user prompt to send.
         """
         self._begin(prompt)
-        client = self._prepare_call(prompt)
+        client = self._prepare_call()
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -153,7 +153,7 @@ class Agent:
         # _begin runs here, on the caller's thread, so the hook fires before any
         # backend call and on the same thread as _finish's (AC-06).
         self._begin(prompt)
-        client = await _foundry.run_off_thread(self._prepare_call, prompt)
+        client = await _foundry.run_off_thread(self._prepare_call)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -203,7 +203,7 @@ class Agent:
         # _begin runs here, on the caller's thread, so the hook fires before any
         # backend call and on the same thread as _finish's (AC-06).
         self._begin(prompt)
-        client = await _foundry.run_off_thread(self._prepare_call, prompt)
+        client = await _foundry.run_off_thread(self._prepare_call)
 
         tool_failures: list[Exception] = []
         next_input: str | list[dict[str, str]] = prompt
@@ -324,17 +324,13 @@ class Agent:
         self._hooks.emit(BeforeInvocationEvent(agent=self, prompt=prompt))
         self._messages.append(contracts.Message(role="user", content=prompt))
 
-    def _prepare_call(self, prompt: str) -> Any:
+    def _prepare_call(self) -> Any:
         """Backend setup for `__call__`/`invoke_async`/`stream_async`.
 
         Builds the client, creates a version if the config changed, and starts the
         conversation. Call `_begin` first — every backend call this makes must happen
         after `BeforeInvocationEvent` has fired (AC-06).
-
-        Args:
-            prompt: Unused; kept so the three paths call this and `_begin` alike.
         """
-        del prompt
         if self._client is None:
             foundry_client = _foundry.FoundryClient(
                 endpoint=self._endpoint, credential=self._credential
