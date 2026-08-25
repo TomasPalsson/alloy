@@ -16,7 +16,6 @@ from ._loop import (
     run_calls,
     translate_stream_event,
 )
-from ._schema import derive
 from ._versions import fingerprint
 
 # Set by `tool()` in _schema.py; a plain, non-decorated tool lacks it and is forwarded
@@ -64,7 +63,7 @@ class Agent:
         self._model = model
         self._system_prompt = system_prompt
         self._tool_specs = [
-            derive(cast(Callable[..., Any], t))
+            cast(contracts.ToolSpec, getattr(t, _TOOL_SPEC_ATTRIBUTE))
             for t in tools
             if hasattr(t, _TOOL_SPEC_ATTRIBUTE)
         ]

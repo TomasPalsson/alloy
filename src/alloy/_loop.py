@@ -68,11 +68,12 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
 
         try:
             value = spec.call(**arguments)
+            output = json.dumps(value)
         except Exception as exc:  # the tool's own failure: returned, never raised (see contract)
             results.append(_failure(call, exc))
             continue
 
-        results.append(ToolResult(call_id=call.call_id, output=json.dumps(value)))
+        results.append(ToolResult(call_id=call.call_id, output=output))
     return results
 
 
