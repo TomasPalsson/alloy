@@ -133,6 +133,29 @@ class _StubBlockingClient:
         self.conversations = _StubConversations()
 
 
+class _StubSlowAgentsOperations:
+    """`list_versions` blocks briefly, like the real control-plane round trip."""
+
+    def __init__(self, delay: float) -> None:
+        self._delay = delay
+
+    def list_versions(self, agent_name: str, **kwargs: Any) -> list[Any]:
+        time.sleep(self._delay)
+        return []
+
+    def create_version(self, agent_name: str, **kwargs: Any) -> None:
+        return None
+
+
+class _StubNamedBlockingClient:
+    """A NAMED agent's client: `_ensure_version` (list_versions) also blocks briefly."""
+
+    def __init__(self, content: str, delay: float = 0.05) -> None:
+        self.responses = _StubBlockingResponses(content, delay)
+        self.conversations = _StubConversations()
+        self.agents = _StubSlowAgentsOperations(delay)
+
+
 async def test_b18_text_deltas_yield_data_events_that_concatenate_to_full_text() -> None:
     turn = [
         _RawDeltaEvent("Hello"),
@@ -221,6 +244,36 @@ async def test_b25_invoke_async_does_not_block_a_concurrent_task() -> None:
     assert isinstance(result, AgentResult)
     assert result.text == "hello"
     assert ticks["count"] > 0
+
+
+async def test_named_agent_invoke_async_does_not_block_a_concurrent_task() -> None:
+    """A NAMED agent's `_prepare_call` also does blocking network I/O — FoundryClient
+    construction, `_ensure_version` (list_versions/create_version), create_conversation —
+    and must run off the event loop too, not just the response.create() call (see F1).
+
+    Checking only "the ticker made progress eventually" isn't enough here: `create_completion`
+    already hops to a thread, so a concurrent task always gets *some* turn later in the call
+    regardless of whether `_prepare_call` blocked first. Instead this measures *when* the
+    ticker gets its first turn — if `_prepare_call`'s 0.05s call blocks the loop, nothing else
+    can run until it returns, so the first tick lands at ~0.05s instead of near-instantly.
+    """
+    client = _StubNamedBlockingClient(content="hello", delay=0.05)
+    agent = Agent(model="gpt-4o", name="weather-agent", client=client)
+    first_tick_at: list[float] = []
+
+    async def ticker() -> None:
+        first_tick_at.append(time.monotonic())
+        for _ in range(50):
+            await asyncio.sleep(0)
+
+    start = time.monotonic()
+    ticker_task = asyncio.create_task(ticker())
+    result = await agent.invoke_async("hello")
+    await ticker_task
+
+    assert isinstance(result, AgentResult)
+    assert result.text == "hello"
+    assert first_tick_at[0] - start < 0.03
 
 
 async def test_b26_abandoned_stream_terminates_worker_thread() -> None:

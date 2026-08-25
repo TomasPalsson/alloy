@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 import alloy
-from alloy import Agent
+from alloy import Agent, tool
 from alloy._versions import fingerprint
 
 
@@ -151,3 +151,52 @@ def test_b17_programming_error_during_create_version_is_not_swallowed_as_version
         agent("hi")
 
     assert exc_info.value is original_error
+
+
+def test_malformed_version_metadata_is_not_swallowed_as_listing_failure() -> None:
+    """A bug while reading an already-listed version's metadata (e.g. `metadata` is `None`)
+    must surface as itself, not be reported as a listing/backend failure (see F2). Only the
+    `list_versions()` round trip itself is a genuine backend failure — B16 must keep
+    passing honestly."""
+    malformed_version = _StubVersion(metadata=cast(Any, None))
+    agents = _StubAgentsOperations(existing_versions=[malformed_version])
+    client = _StubClient(agents=agents)
+    agent = Agent(
+        model="gpt-4o", system_prompt="You are helpful.", name="weather-agent", client=client
+    )
+
+    with pytest.raises(AttributeError):
+        agent("hi")
+
+    assert agents.create_calls == []
+
+
+def test_passthrough_tool_is_forwarded_unmodified_to_the_backend_definition() -> None:
+    """FR-013/AC-040: a non-decorated tool object must reach the backend agent definition
+    untouched, not be silently dropped by `Agent.__init__`'s `tools=` filter (see F3)."""
+
+    @tool
+    def get_oncall(team: str) -> str:
+        """Look up who is on call for a team.
+
+        Args:
+            team: Team name.
+        """
+        return f"{team}-oncall"
+
+    passthrough = {"type": "code_interpreter"}
+    agents = _StubAgentsOperations()
+    client = _StubClient(agents=agents)
+    agent = Agent(
+        model="gpt-4o",
+        tools=[get_oncall, passthrough],
+        name="weather-agent",
+        client=client,
+    )
+
+    agent("hi")
+
+    assert len(agents.create_calls) == 1
+    tools = agents.create_calls[0]["definition"].tools
+    assert passthrough in tools
+    assert any(getattr(t, "name", None) == "get_oncall" for t in tools)

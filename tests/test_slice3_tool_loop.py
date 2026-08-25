@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from alloy import Agent, ToolArgumentError, UnknownToolError
+from alloy import Agent, AlloyError, ToolArgumentError, UnknownToolError
 from alloy._loop import run_calls
 from alloy._schema import derive, tool
 from alloy.contracts import ToolCall
@@ -184,9 +184,61 @@ def test_b29_missing_required_argument_raises_before_tool_runs() -> None:
         return team
 
     spec = derive(needs_team)
-    call = ToolCall(call_id="call_1", name="needs_team", arguments={})
+    call = ToolCall(call_id="call_1", name="needs_team", arguments="{}")
 
     results = run_calls([call], {"needs_team": spec})
 
     assert executed is False
     assert isinstance(results[0].failure, ToolArgumentError)
+
+
+def test_malformed_json_arguments_is_returned_as_a_tool_failure_not_raised() -> None:
+    """A model-supplied argument string that isn't valid JSON must not escape the run as a
+    bare json.JSONDecodeError — it becomes a ToolResult.failure, like a tool raising (F5)."""
+
+    @tool
+    def echo(x: int) -> int:
+        """Echo a value back.
+
+        Args:
+            x: The value.
+        """
+        return x
+
+    call_item = _FunctionCallItem(call_id="call_1", name="echo", arguments="{not valid json")
+    client = _StubClient([_StubResponse(output=[call_item]), _StubResponse(content="handled")])
+    agent = Agent(model="gpt-4o", tools=[echo], client=client)
+
+    result = agent("go")
+
+    assert result.text == "handled"
+    assert len(result.tool_failures) == 1
+    assert isinstance(result.tool_failures[0], ToolArgumentError)
+
+
+def test_tool_loop_raises_alloy_error_after_max_turns_instead_of_looping_forever() -> None:
+    """A model that keeps emitting tool calls must not loop forever (F4)."""
+
+    @tool
+    def echo(x: int) -> int:
+        """Echo a value back.
+
+        Args:
+            x: The value.
+        """
+        return x
+
+    # Every turn's response asks for another tool call — the loop never gets a plain-text
+    # response on its own, so only the max-turns guard can end it.
+    call_args = '{"x": 1}'
+    responses = [
+        _StubResponse(
+            output=[_FunctionCallItem(call_id=f"call_{i}", name="echo", arguments=call_args)]
+        )
+        for i in range(50)
+    ]
+    client = _StubClient(responses)
+    agent = Agent(model="gpt-4o", tools=[echo], client=client)
+
+    with pytest.raises(AlloyError, match="10"):
+        agent("go")

@@ -72,7 +72,9 @@ class ToolCall:
 
     call_id: str
     name: str
-    arguments: dict[str, Any]
+    # Raw JSON string, undecoded — decoded lazily by run_calls, so malformed JSON becomes
+    # a ToolResult.failure rather than a bare json.JSONDecodeError escaping the run (F5).
+    arguments: str
 
 
 @dataclass(frozen=True, slots=True)

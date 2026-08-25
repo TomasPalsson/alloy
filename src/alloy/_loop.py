@@ -22,14 +22,14 @@ def extract_tool_calls(response: Any) -> list[ToolCall]:
     Looks for a `response.output` list holding items with `type == "function_call"`
     (the shape observed for openai's ResponseFunctionToolCall). A response with no
     such list — e.g. a plain-text completion — yields no calls.
+
+    `arguments` is kept as the raw JSON string here, undecoded — `run_calls` decodes it,
+    so malformed JSON becomes a `ToolResult.failure` like any other tool failure, rather
+    than a bare `json.JSONDecodeError` escaping the run (see F5).
     """
     items: list[Any] = getattr(response, "output", None) or []
     return [
-        ToolCall(
-            call_id=str(item.call_id),
-            name=str(item.name),
-            arguments=decode_arguments(str(item.arguments)),
-        )
+        ToolCall(call_id=str(item.call_id), name=str(item.name), arguments=str(item.arguments))
         for item in items
         if getattr(item, "type", None) == "function_call"
     ]
@@ -49,9 +49,16 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
             results.append(_failure(call, UnknownToolError(f"no tool named {call.name!r}")))
             continue
 
-        missing = [
-            name for name in spec.parameters.get("required", []) if name not in call.arguments
-        ]
+        try:
+            arguments = decode_arguments(call.arguments)
+        except json.JSONDecodeError as exc:
+            failure = ToolArgumentError(
+                f"tool {call.name!r} received malformed JSON arguments: {exc}"
+            )
+            results.append(_failure(call, failure))
+            continue
+
+        missing = [name for name in spec.parameters.get("required", []) if name not in arguments]
         if missing:
             failure = ToolArgumentError(
                 f"tool {call.name!r} is missing required argument(s): {', '.join(missing)}"
@@ -60,7 +67,7 @@ def run_calls(calls: Sequence[ToolCall], tools: Mapping[str, ToolSpec]) -> list[
             continue
 
         try:
-            value = spec.call(**call.arguments)
+            value = spec.call(**arguments)
         except Exception as exc:  # the tool's own failure: returned, never raised (see contract)
             results.append(_failure(call, exc))
             continue
@@ -94,11 +101,7 @@ def extract_tool_call_from_stream_item(raw_event: Any) -> ToolCall | None:
     item = raw_event.item
     if getattr(item, "type", None) != "function_call":
         return None
-    return ToolCall(
-        call_id=str(item.call_id),
-        name=str(item.name),
-        arguments=decode_arguments(str(item.arguments)),
-    )
+    return ToolCall(call_id=str(item.call_id), name=str(item.name), arguments=str(item.arguments))
 
 
 def extract_final_text_from_stream_event(raw_event: Any) -> str | None:
