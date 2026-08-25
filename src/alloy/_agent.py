@@ -4,12 +4,30 @@ from __future__ import annotations
 
 import uuid
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 
 from . import contracts
+from ._loop import extract_tool_calls, run_calls
 from ._schema import derive
 from ._versions import fingerprint
+
+# Set by `tool()` in _schema.py; a plain, non-decorated tool lacks it and is forwarded
+# to the backend unmodified rather than derived (see B7, B11 — it's never run locally).
+_TOOL_SPEC_ATTRIBUTE = "__alloy_tool_spec__"
+
+
+class _ToolNamespace:
+    """Attribute access over an agent's own tools: `agent.tool.<name>(**kwargs)` runs it directly."""
+
+    def __init__(self, tool_map: Mapping[str, contracts.ToolSpec]) -> None:
+        self._tool_map = tool_map
+
+    def __getattr__(self, name: str) -> Callable[..., Any]:
+        spec = self._tool_map.get(name)
+        if spec is None:
+            raise contracts.UnknownToolError(f"no tool named {name!r}")
+        return spec.call
 
 
 class Agent:
@@ -28,7 +46,12 @@ class Agent:
     ) -> None:
         self._model = model
         self._system_prompt = system_prompt
-        self._tool_specs = [derive(cast(Callable[..., Any], t)) for t in tools]
+        self._tool_specs = [
+            derive(cast(Callable[..., Any], t))
+            for t in tools
+            if hasattr(t, _TOOL_SPEC_ATTRIBUTE)
+        ]
+        self._tool_map = {spec.name: spec for spec in self._tool_specs}
         self._name = name
         self._endpoint = endpoint
         self._credential = credential
@@ -41,8 +64,13 @@ class Agent:
         """Read-only view of the conversation history so far."""
         return list(self._messages)
 
+    @property
+    def tool(self) -> _ToolNamespace:
+        """Direct, model-free invocation of this agent's own tools by name."""
+        return _ToolNamespace(self._tool_map)
+
     def __call__(self, prompt: str) -> contracts.AgentResult:
-        """Send a prompt to the model and return its result.
+        """Send a prompt to the model and return its result, running any tool calls it makes.
 
         Args:
             prompt: The user prompt to send.
@@ -64,20 +92,33 @@ class Agent:
 
         self._messages.append(contracts.Message(role="user", content=prompt))
 
+        tool_failures: list[Exception] = []
+        while True:
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=self._request_messages(),
+                conversation_id=self._conversation_id,
+            )
+            calls = extract_tool_calls(response)
+            if not calls:
+                text = response.choices[0].message.content
+                break
+
+            for result in run_calls(calls, self._tool_map):
+                if result.failure is not None:
+                    tool_failures.append(result.failure)
+                self._messages.append(contracts.Message(role="tool", content=result.output))
+
+        self._messages.append(contracts.Message(role="assistant", content=text))
+        return contracts.AgentResult(text=text, tool_failures=tuple(tool_failures))
+
+    def _request_messages(self) -> list[dict[str, str]]:
+        """Build the request payload from the system prompt and conversation so far."""
         request_messages: list[dict[str, str]] = []
         if self._system_prompt:
             request_messages.append({"role": "system", "content": self._system_prompt})
         request_messages.extend({"role": m.role, "content": m.content} for m in self._messages)
-
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=request_messages,
-            conversation_id=self._conversation_id,
-        )
-        text = response.choices[0].message.content
-
-        self._messages.append(contracts.Message(role="assistant", content=text))
-        return contracts.AgentResult(text=text)
+        return request_messages
 
     def _ensure_version(self, client: Any) -> None:
         """Create a backend version for the current config, unless one already matches.
