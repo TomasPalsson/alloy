@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any, cast
+
 import pytest
 
 from alloy import ToolSchemaError
@@ -13,7 +16,7 @@ class _Coordinate:
     """A custom type with no JSON Schema mapping."""
 
 
-def test_B5_defaulted_parameter_absent_from_required() -> None:
+def test_b5_defaulted_parameter_absent_from_required() -> None:
     @tool
     def search(query: str, limit: int = 10) -> str:
         """Search for something.
@@ -30,11 +33,11 @@ def test_B5_defaulted_parameter_absent_from_required() -> None:
     assert "limit" not in spec.parameters["required"]
 
 
-def test_B6_undecidable_type_raises_at_decoration_time() -> None:
+def test_b6_undecidable_type_raises_at_decoration_time() -> None:
     with pytest.raises(ToolSchemaError, match="location"):
 
         @tool
-        def move(location: _Coordinate) -> str:
+        def move(location: _Coordinate) -> str:  # pyright: ignore[reportUnusedFunction]
             """Move to a location.
 
             Args:
@@ -43,7 +46,7 @@ def test_B6_undecidable_type_raises_at_decoration_time() -> None:
             return "ok"
 
 
-def test_B7_mixed_tools_list_derives_decorated_forwards_plain() -> None:
+def test_b7_mixed_tools_list_derives_decorated_forwards_plain() -> None:
     @tool
     def get_weather(city: str) -> str:
         """Look up the weather.
@@ -57,7 +60,8 @@ def test_B7_mixed_tools_list_derives_decorated_forwards_plain() -> None:
     tools: list[object] = [get_weather, plain_tool]
 
     processed = [
-        derive(t) if hasattr(t, "__alloy_tool_spec__") else t for t in tools
+        derive(cast(Callable[..., Any], t)) if hasattr(t, "__alloy_tool_spec__") else t
+        for t in tools
     ]
 
     assert isinstance(processed[0], ToolSpec)
