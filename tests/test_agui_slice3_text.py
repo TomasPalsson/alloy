@@ -82,9 +82,7 @@ def _run_input(
     )
 
 
-async def _collect(
-    fake: object, run_input: ag_ui_core.RunAgentInput
-) -> list[ag_ui_core.BaseEvent]:
+async def _collect(fake: object, run_input: ag_ui_core.RunAgentInput) -> list[ag_ui_core.BaseEvent]:
     return [event async for event in agui.run_stream(cast(Agent, fake), run_input)]
 
 
@@ -205,9 +203,7 @@ def test_b14_open_text_closes_before_run_error() -> None:
     end_index = next(
         i for i, e in enumerate(events) if isinstance(e, ag_ui_core.TextMessageEndEvent)
     )
-    error_index = next(
-        i for i, e in enumerate(events) if isinstance(e, ag_ui_core.RunErrorEvent)
-    )
+    error_index = next(i for i, e in enumerate(events) if isinstance(e, ag_ui_core.RunErrorEvent))
     assert end_index < error_index
     assert sum(1 for e in events if isinstance(e, ag_ui_core.TextMessageEndEvent)) == 1
     agui.check_conformance(events)

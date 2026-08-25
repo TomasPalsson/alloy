@@ -38,7 +38,15 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from ag_ui.encoder import EventEncoder
+
 from alloy import Agent, tool
+from alloy.agui import (
+    ThreadStore,
+    latest_user_prompt,
+    parse_run_input,
+    run_stream,
+)
 from alloy.hooks import (
     AfterToolCallEvent,
     BeforeToolCallEvent,
@@ -47,6 +55,22 @@ from alloy.hooks import (
 )
 
 PORT = 8080
+
+# The verification page loads from file://, so every request to this endpoint is
+# cross-origin and `application/json` is not a simple content type — the browser sends an
+# OPTIONS preflight first and will not send the real POST until it is answered. Withholding
+# the header would not make a loopback-bound unauthenticated demo endpoint safer, only
+# untestable in the one place the protocol is meant to be used. A real CORS POLICY (origin
+# allow-lists, credentials, configurability) remains out of scope.
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "content-type, accept",
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+}
+
+# One per process: a thread's conversation must outlive the request that created it, or
+# the agent forgets everything after the first message.
+THREADS = ThreadStore()
 
 
 def dispatch(
@@ -58,11 +82,59 @@ def dispatch(
     `/invoke`; returns an iterator of SSE `data: ...` frame strings for a streaming
     `/invoke`. The handler tells the two apart with `isinstance(outcome, tuple)`.
     """
+    if method == "OPTIONS":
+        return 204, {}, CORS_HEADERS
     if method == "GET" and path == "/ping":
         return 200, {"status": "Healthy"}
+    if method == "POST" and path == "/":
+        return _handle_agui(raw_body, agent_factory)
     if method == "POST" and path in ("/invoke", "/invocations"):
         return _handle_invoke(raw_body, agent_factory)
     return 404, {"error": f"no such route: {method} {path}"}
+
+
+def _handle_agui(
+    raw_body: bytes, agent_factory: Callable[[], Agent]
+) -> tuple[int, dict[str, Any]] | Iterator[str]:
+    """Answer one AG-UI run: parse, validate, then stream protocol events.
+
+    The 400/422 split is deliberate and is NOT shared with `/invoke`: a client needs to
+    tell "your JSON is broken" from "your JSON is fine but the shape is wrong", and only
+    the second is worth retrying with a corrected field.
+    """
+    try:
+        run_input = parse_run_input(raw_body)
+    except json.JSONDecodeError as exc:
+        return 400, {"error": f"malformed JSON body: {exc}"}
+    except ValueError as exc:
+        return 422, {"error": f"not a valid RunAgentInput: {exc}"}
+
+    try:
+        # Validated here rather than mid-stream: a run that has already emitted
+        # RUN_STARTED can only report this as RUN_ERROR inside a 200, which a client
+        # cannot distinguish from a backend failure.
+        latest_user_prompt(run_input)
+    except ValueError as exc:
+        return 422, {"error": str(exc)}
+
+    return _agui_frames(run_input, agent_factory)
+
+
+def _agui_frames(run_input: Any, agent_factory: Callable[[], Agent]) -> Iterator[str]:
+    """Drive `run_stream` on a private event loop, encoding each event to the wire."""
+    encoder = EventEncoder()
+    agent = agent_factory()
+    loop = asyncio.new_event_loop()
+    try:
+        stream = run_stream(agent, run_input)
+        while True:
+            try:
+                event = loop.run_until_complete(stream.__anext__())
+            except StopAsyncIteration:
+                return
+            yield encoder.encode(event)
+    finally:
+        loop.close()
 
 
 def _handle_invoke(

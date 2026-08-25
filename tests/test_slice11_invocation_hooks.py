@@ -194,9 +194,7 @@ def test_before_invocation_fires_once_before_any_backend_call() -> None:
             registry.add_callback(BeforeInvocationEvent, _record)
 
     client = _TracingClient()
-    agent = Agent(
-        model="gpt-4o", name="traced-agent", client=client, hooks=[_Recorder()]
-    )
+    agent = Agent(model="gpt-4o", name="traced-agent", client=client, hooks=[_Recorder()])
     result = agent("hi there")
 
     assert trace[0] == "hook:BeforeInvocationEvent", trace
@@ -295,9 +293,7 @@ async def test_ac17_all_three_call_paths_fire_the_same_event_sequence() -> None:
     call_item = _FunctionCallItem(call_id="call_1", name="add_one", arguments='{"x": 1}')
 
     sync_log: list[str] = []
-    sync_client = _StubClient(
-        [_StubResponse(output=[call_item]), _StubResponse(content="handled")]
-    )
+    sync_client = _StubClient([_StubResponse(output=[call_item]), _StubResponse(content="handled")])
     sync_agent = Agent(
         model="gpt-4o", tools=[add_one], client=sync_client, hooks=[_EventLogger(sync_log)]
     )

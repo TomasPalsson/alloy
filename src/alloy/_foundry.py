@@ -130,9 +130,7 @@ def _as_sdk_tool(item: Any) -> Any:
     )
 
 
-def build_prompt_agent_definition(
-    *, model: str, instructions: str, tools: Sequence[Any]
-) -> Any:
+def build_prompt_agent_definition(*, model: str, instructions: str, tools: Sequence[Any]) -> Any:
     """Build the real SDK agent definition (`_agent.py` may not import azure.* to do this).
 
     Maps alloy's `system_prompt` onto the SDK's `instructions` field — that field is named

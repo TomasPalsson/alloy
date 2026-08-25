@@ -34,9 +34,7 @@ def test_hooks_example_guardrail_cancels_destructive_tool_and_audit_hook_wires_u
     harmless = ToolCall(call_id="1", name="check_disk_space", arguments="{}")
     destructive = ToolCall(call_id="2", name="wipe_database", arguments="{}")
 
-    harmless_event = registry.emit(
-        hooks_example.BeforeToolCallEvent(agent=None, tool_use=harmless)
-    )
+    harmless_event = registry.emit(hooks_example.BeforeToolCallEvent(agent=None, tool_use=harmless))
     destructive_event = registry.emit(
         hooks_example.BeforeToolCallEvent(agent=None, tool_use=destructive)
     )

@@ -32,6 +32,7 @@ and tool calls looks legal under rules 1-7 alone and is still refused by a real 
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -47,6 +48,7 @@ AGUI_EXTRA_HINT = "install the AG-UI extra: pip install 'alloy-foundry[agui]'"
 
 try:
     import ag_ui.core as ag_ui_core
+    from pydantic import ValidationError as PydanticValidationError
 except ImportError:
     raise ImportError(AGUI_EXTRA_HINT) from None
 
@@ -71,8 +73,19 @@ def parse_run_input(raw: bytes) -> ag_ui_core.RunAgentInput:
 
     Returns:
         The parsed run input.
+
+    Raises:
+        json.JSONDecodeError: `raw` is not JSON at all.
+        ValueError: `raw` is JSON but not a valid `RunAgentInput`.
     """
-    raise NotImplementedError
+    # Two distinct failures, deliberately not collapsed: a caller needs to tell "your JSON
+    # is broken" (400) from "your JSON is fine, this field is wrong" (422), and only the
+    # second is worth retrying with a corrected field.
+    parsed: Any = json.loads(raw)
+    try:
+        return ag_ui_core.RunAgentInput.model_validate(parsed)
+    except PydanticValidationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def seed_state(run_input: ag_ui_core.RunAgentInput) -> dict[str, Any]:

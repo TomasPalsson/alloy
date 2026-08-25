@@ -95,7 +95,8 @@ Strands signatures where they fit; Azure-specific additions marked.
 ```python
 from alloy import Agent, tool
 
-@tool                                    # or @tool(name=..., description=...)
+
+@tool  # or @tool(name=..., description=...)
 def get_oncall(team: str) -> str:
     """Look up who is on call for an engineering team.
 
@@ -104,29 +105,30 @@ def get_oncall(team: str) -> str:
     """
     return ONCALL[team]
 
+
 agent = Agent(
-    model="gpt-4o",                      # Strands
-    system_prompt="You help engineers.", # Strands (maps to Foundry `instructions`)
-    tools=[get_oncall],                  # Strands
-    name="oncall-agent",                 # Strands; also the Foundry agent_name
-    endpoint=None,                       # AZURE-SPECIFIC; defaults to $AZURE_AI_PROJECT_ENDPOINT
-    credential=None,                     # AZURE-SPECIFIC; defaults to DefaultAzureCredential()
+    model="gpt-4o",  # Strands
+    system_prompt="You help engineers.",  # Strands (maps to Foundry `instructions`)
+    tools=[get_oncall],  # Strands
+    name="oncall-agent",  # Strands; also the Foundry agent_name
+    endpoint=None,  # AZURE-SPECIFIC; defaults to $AZURE_AI_PROJECT_ENDPOINT
+    credential=None,  # AZURE-SPECIFIC; defaults to DefaultAzureCredential()
 )
 
 result = agent("Who is on call for data?")
-print(result)          # stringifiable, like Strands
-result.text            # AZURE-SPECIFIC explicit accessor — Strands' AgentResult
-                       # attributes were never confirmed in research, so we define a clean one
+print(result)  # stringifiable, like Strands
+result.text  # AZURE-SPECIFIC explicit accessor — Strands' AgentResult
+# attributes were never confirmed in research, so we define a clean one
 
-result = await agent.invoke_async("...")   # Strands; async, no streaming
+result = await agent.invoke_async("...")  # Strands; async, no streaming
 
 async for event in agent.stream_async("..."):
-    ...                # StreamEvent dicts, Strands-shaped keys: data, message,
-                       # current_tool_use, result
+    ...  # StreamEvent dicts, Strands-shaped keys: data, message,
+    # current_tool_use, result
 
-agent.tool.get_oncall(team="data")   # Strands; run a held tool directly, no model call
+agent.tool.get_oncall(team="data")  # Strands; run a held tool directly, no model call
 
-agent.messages         # Strands: in-memory conversation history
+agent.messages  # Strands: in-memory conversation history
 ```
 
 ---

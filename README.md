@@ -26,6 +26,7 @@ not at import time.
 ```python
 from alloy import Agent, tool
 
+
 @tool
 def get_oncall(team: str) -> str:
     """Look up who is on call for an engineering team.
@@ -34,6 +35,7 @@ def get_oncall(team: str) -> str:
         team: Team name, e.g. platform
     """
     return ONCALL[team]
+
 
 agent = Agent(
     model="gpt-4o",
@@ -75,6 +77,7 @@ to rewrite its arguments before it runs. An `AfterToolCallEvent` callback can re
 from alloy import Agent, tool
 from alloy.hooks import BeforeToolCallEvent, HookProvider, HookRegistry
 
+
 class Guardrail(HookProvider):
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(BeforeToolCallEvent, self.block_destructive)
@@ -82,6 +85,7 @@ class Guardrail(HookProvider):
     def block_destructive(self, event: BeforeToolCallEvent) -> None:
         if event.tool_use.name.startswith("delete_"):
             event.cancel_tool = "blocked by policy"
+
 
 agent = Agent(model="gpt-4o", tools=[...], hooks=[Guardrail()])
 ```
