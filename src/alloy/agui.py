@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from ._agent import Agent
@@ -246,9 +247,29 @@ def latest_user_prompt(run_input: ag_ui_core.RunAgentInput) -> str:
         The newest user message's text.
 
     Raises:
-        ValueError: `run_input.messages` holds no user message.
+        ValueError: `run_input.messages` holds no user message, or the newest one carries
+            no text this build can read.
     """
-    raise NotImplementedError
+    for message in reversed(run_input.messages):
+        if isinstance(message, ag_ui_core.UserMessage):
+            content = message.content
+            if isinstance(content, str):
+                return content
+            # Multimodal is a non-goal, but silently keeping only the text parts would ask
+            # the model about an image it never received — a wrong answer that reads like a
+            # working one. Reject the message and name what it carried.
+            unsupported = sorted(
+                {p.type for p in content if not isinstance(p, ag_ui_core.TextInputContent)}
+            )
+            if unsupported:
+                raise ValueError(
+                    f"only text content is supported; this message carries {', '.join(unsupported)}"
+                )
+            text = "".join(p.text for p in content if isinstance(p, ag_ui_core.TextInputContent))
+            if not text:
+                raise ValueError("no text content in the newest user message")
+            return text
+    raise ValueError("no user message in run_input.messages")
 
 
 async def run_stream(
@@ -267,15 +288,23 @@ async def run_stream(
         AG-UI events in wire order.
     """
     yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
+    message_id: str | None = None
     try:
-        # ponytail: message history -> prompt translation is a later slice's job (see
-        # `seed_state`/`parse_run_input`, still NotImplementedError). This slice only
-        # brackets the run, so it drives the agent without inspecting what it streams back.
-        async for _event in agent.stream_async(""):
-            pass
+        prompt = latest_user_prompt(run_input)
+        async for event in agent.stream_async(prompt):
+            if "data" not in event:
+                continue
+            if message_id is None:
+                message_id = uuid4().hex
+                yield ag_ui_core.TextMessageStartEvent(message_id=message_id)
+            yield ag_ui_core.TextMessageContentEvent(message_id=message_id, delta=event["data"])
     except Exception as exc:
+        if message_id is not None:
+            yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
         yield ag_ui_core.RunErrorEvent(message=str(exc))
         return
+    if message_id is not None:
+        yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
     yield ag_ui_core.RunFinishedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
 
 

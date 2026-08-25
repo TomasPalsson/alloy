@@ -239,3 +239,41 @@ def test_b51_no_user_message_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="no user message"):
         agui.latest_user_prompt(run_input)
+
+
+def test_b51_list_content_with_non_text_part_is_rejected_not_silently_dropped() -> None:
+    # Multimodal is a non-goal, but a non-goal is a promise about scope, not permission to
+    # drop data. Joining only the text parts sends the model a question about an image it
+    # never received, and that reads as a working answer.
+    message = ag_ui_core.UserMessage(
+        id="u1",
+        content=[
+            ag_ui_core.TextInputContent(text="what is in this picture?"),
+            ag_ui_core.ImageInputContent(
+                source=ag_ui_core.InputContentUrlSource(
+                    value="https://example.invalid/a.png", mime_type="image/png"
+                )
+            ),
+        ],
+    )
+    with pytest.raises(ValueError, match="only text content is supported"):
+        agui.latest_user_prompt(_run_input(messages=[message]))
+
+
+def test_b51_empty_list_content_is_rejected_not_turned_into_an_empty_prompt() -> None:
+    # "".join([]) == "" — an empty prompt reaching the model is the exact failure this
+    # slice exists to remove, so it must raise rather than return a falsy string.
+    message = ag_ui_core.UserMessage(id="u1", content=[])
+    with pytest.raises(ValueError, match="no text content"):
+        agui.latest_user_prompt(_run_input(messages=[message]))
+
+
+def test_b51_list_content_of_only_text_parts_is_joined() -> None:
+    message = ag_ui_core.UserMessage(
+        id="u1",
+        content=[
+            ag_ui_core.TextInputContent(text="hello "),
+            ag_ui_core.TextInputContent(text="world"),
+        ],
+    )
+    assert agui.latest_user_prompt(_run_input(messages=[message])) == "hello world"

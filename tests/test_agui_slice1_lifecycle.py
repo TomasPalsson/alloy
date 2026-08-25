@@ -48,7 +48,9 @@ def _run_input(thread_id: str = "thread-1", run_id: str = "run-1") -> ag_ui_core
         thread_id=thread_id,
         run_id=run_id,
         state=None,
-        messages=[],
+        # Slice 3 made `run_stream` require a user message (`latest_user_prompt`); bracketing
+        # itself doesn't care what the prompt is, so a fixed placeholder satisfies it.
+        messages=[ag_ui_core.UserMessage(id="u1", content="hi")],
         tools=[],
         context=[],
         forwarded_props=None,
