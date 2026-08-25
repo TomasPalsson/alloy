@@ -325,7 +325,7 @@ All tests MUST pass with no Azure credentials and no network access, via a fake 
 |----|------------|-----------|----------|
 | A-1 | The Responses API function-call round-trip uses OpenAI's shape (`function_call` items; `function_call_output` submitted back). | Medium | Reworks one module only, by 5.3's DIP boundary. |
 | A-2 | `responses.create(stream=True)` works against a Foundry-hosted agent. | **Low** | FR-011 covers it: `StreamingUnsupportedError`, documented. |
-| A-3 | `project.agents.list_versions` exists and is callable for reuse. | Medium | FR-009 covers it: create + warn. |
+| A-3 | ~~`list_versions` exists~~ **VERIFIED** against installed SDK 2.5.0, with `metadata` on `create_version` to carry the fingerprint. | High | n/a — resolved |
 | A-4 | `gpt-4o` is deployed in the target project. | High | Configurable; `iac/` deploys it. |
 | A-5 | `get_openai_client()` returns a genuine `openai.OpenAI`, so the OpenAI SDK's client-side shapes apply even where Foundry's server behaviour is unverified. | High | Confirmed by SDK source inspection in research. |
 
@@ -337,4 +337,4 @@ All tests MUST pass with no Azure credentials and no network access, via a fake 
 |----|----------|-----------|------------|
 | Q-1 | Exact function-call item shape on Foundry's Responses API. | No — isolated behind the backend protocol | One live call after `az login`; print `response.output`. |
 | Q-2 | Whether `stream=True` works against Foundry. | No — FR-011 degrades honestly | Live smoke test. |
-| Q-3 | Signature of `project.agents.list_versions`. | No — FR-009 degrades | `inspect.signature` on the installed SDK. |
+| Q-3 | ~~Signature of `list_versions`~~ **RESOLVED** 2026-08-24: `list_versions(agent_name, *, limit, order, before, include_drafts)`. | Closed | — |

@@ -82,7 +82,7 @@ Tests inject a stub through `client=` — no interface to implement, only a shap
 ## 7. Decisions
 
 - Azure seam, facing **one production backend and a test stub (the pattern gate counts a stub as zero)**: chose **concrete `_foundry.FoundryClient` + an `.importlinter` contract**, rejected **a `Backend` Protocol**, to contain blast radius without a one-implementer interface, accepting **a second backend means editing `_agent.py`, not adding a class**. `Makes hard:` a second backend — touches `_agent.py`, `_foundry.py`.
-- Lifecycle, facing **Foundry's 1,000-version cap and repeated script runs**: chose **`fingerprint(...)` gating `create_version`**, rejected **create-on-construct**, to get free construction and idempotent reruns, accepting **a collision would silently reuse a stale version**. `Makes hard:` per-call definition overrides — touches `_agent.py`, `_versions.py`.
+- Lifecycle, facing **Foundry's 1,000-version cap and repeated script runs**: chose **storing `fingerprint(...)` in `create_version(metadata={"alloy_fingerprint": fp})` and matching it via `list_versions(agent_name, limit=...)`** (both signatures verified against installed SDK 2.5.0), rejected **re-deriving and diffing definitions**, to get free construction and idempotent reruns, accepting **a collision would silently reuse a stale version**. `Makes hard:` per-call definition overrides — touches `_agent.py`, `_versions.py`.
 - Tool failure, facing **AC-005 "the run does not raise"**: chose **`ToolResult.failure` + `AgentResult.tool_failures`**, rejected **propagating**, for model-side recovery, accepting **a silent failure is visible only if the caller looks**. `Makes hard:` fail-fast callers — touches `_loop.py`, `_agent.py`.
 - Streaming, facing **A-2 (Low confidence: `stream=True` unverified)**: chose **raising `StreamingUnsupportedError`**, rejected **chunking a complete response**, for an honest failure, accepting **no streaming until Foundry is confirmed**. `Makes hard:` a streaming-always API — touches `_agent.py`.
 - Async, facing **`get_openai_client()` returning a documented SYNC `openai.OpenAI`, with an async variant only hinted at**: chose **`asyncio.to_thread` for `invoke_async`, and a worker thread pumping the sync stream iterator into an `asyncio.Queue` for `stream_async`**, rejected **`azure.ai.projects.aio`**, to use only verified surface without blocking the event loop, accepting **one thread hop per call and a queue to drain on cancellation**. `Makes hard:` true end-to-end async — touches `_foundry.py` only.
@@ -141,6 +141,9 @@ MODULE     `src/alloy/_versions.py` layer 1 · may import: contracts, stdlib · 
            `src/alloy/_agent.py` layer 2 · call `fingerprint` before each run · seam: orchestration
            `src/alloy/__init__.py` layer 3 · re-export `VersionCapError` · seam: public API
 CALLS      `fingerprint(model: str, system_prompt: str, tool_schemas: Sequence[JsonSchema]) -> str`
+           VERIFIED SDK 2.5.0: `create_version(agent_name, *, definition, metadata: dict[str,str] | None, ...)`
+           and `list_versions(agent_name, *, limit, order, before, include_drafts)`. Store the
+           fingerprint under metadata key `alloy_fingerprint`; match on it. Do NOT diff definitions.
 DUPLICATE  Hashing lives here only. `_agent.py` calls it; it never re-implements it.
 THE FIVE   (as Slice 1)
 
