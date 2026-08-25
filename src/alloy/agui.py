@@ -275,12 +275,15 @@ def latest_user_prompt(run_input: ag_ui_core.RunAgentInput) -> str:
     raise ValueError("no user message in run_input.messages")
 
 
-def _tool_result_event(
-    tool_call_id: str, result: contracts.ToolResult
-) -> ag_ui_core.ToolCallResultEvent:
-    """Build one TOOL_CALL_RESULT, minting a fresh message_id (AC-09)."""
+def _tool_result_event(result: contracts.ToolResult) -> ag_ui_core.ToolCallResultEvent:
+    """Build one TOOL_CALL_RESULT, minting a fresh message_id (AC-09).
+
+    `result.call_id` is the tool_call_id to report: every ToolResult _loop.py builds
+    (success, failure, or cancellation) carries the originating call's id, so there is no
+    separate id to thread through here.
+    """
     return ag_ui_core.ToolCallResultEvent(
-        message_id=uuid4().hex, tool_call_id=tool_call_id, content=result.output
+        message_id=uuid4().hex, tool_call_id=result.call_id, content=result.output
     )
 
 
@@ -310,12 +313,12 @@ async def run_stream(
     # agent.stream_async's own frame, never inside this generator's own body, so it can't
     # yield. Drained (and cleared) at every point below that could otherwise let a result
     # go unreported: before handling each new stream event, after the loop, and on error.
-    pending_results: list[tuple[str, contracts.ToolResult]] = []
+    pending_results: list[contracts.ToolResult] = []
 
     def _record_result(event: AfterToolCallEvent) -> None:
-        pending_results.append((event.tool_use.call_id, event.result))
+        pending_results.append(event.result)
 
-    def _drain() -> list[tuple[str, contracts.ToolResult]]:
+    def _drain() -> list[contracts.ToolResult]:
         drained = list(pending_results)
         pending_results.clear()
         return drained
@@ -324,8 +327,8 @@ async def run_stream(
     try:
         prompt = latest_user_prompt(run_input)
         async for event in agent.stream_async(prompt):
-            for tool_call_id, result in _drain():
-                yield _tool_result_event(tool_call_id, result)
+            for result in _drain():
+                yield _tool_result_event(result)
 
             if "current_tool_use" in event:
                 call = cast(contracts.ToolCall, event["current_tool_use"])
@@ -346,16 +349,16 @@ async def run_stream(
                 yield ag_ui_core.TextMessageStartEvent(message_id=message_id)
             yield ag_ui_core.TextMessageContentEvent(message_id=message_id, delta=event["data"])
     except Exception as exc:
-        for tool_call_id, result in _drain():
-            yield _tool_result_event(tool_call_id, result)
+        for result in _drain():
+            yield _tool_result_event(result)
         if message_id is not None:
             yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
         yield ag_ui_core.RunErrorEvent(message=str(exc))
         return
     finally:
         agent.hooks.remove_callback(AfterToolCallEvent, _record_result)
-    for tool_call_id, result in _drain():
-        yield _tool_result_event(tool_call_id, result)
+    for result in _drain():
+        yield _tool_result_event(result)
     if message_id is not None:
         yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
     yield ag_ui_core.RunFinishedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
