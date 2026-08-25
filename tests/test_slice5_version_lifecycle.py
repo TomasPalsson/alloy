@@ -11,22 +11,13 @@ from alloy import Agent
 from alloy._versions import fingerprint
 
 
-class _StubMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
-
-
-class _StubChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _StubMessage(content)
-
-
 class _StubResponse:
     def __init__(self, content: str) -> None:
-        self.choices = [_StubChoice(content)]
+        self.output_text = content
+        self.output: list[Any] = []
 
 
-class _StubCompletions:
+class _StubResponses:
     def __init__(self, content: str) -> None:
         self._content = content
 
@@ -34,9 +25,14 @@ class _StubCompletions:
         return _StubResponse(self._content)
 
 
-class _StubChat:
-    def __init__(self, completions: _StubCompletions) -> None:
-        self.completions = completions
+class _StubConversation:
+    def __init__(self, id: str) -> None:
+        self.id = id
+
+
+class _StubConversations:
+    def create(self, **kwargs: Any) -> _StubConversation:
+        return _StubConversation("conv_1")
 
 
 class _StubVersion:
@@ -70,7 +66,8 @@ class _StubAgentsOperations:
 
 class _StubClient:
     def __init__(self, agents: _StubAgentsOperations, content: str = "hello") -> None:
-        self.chat = _StubChat(_StubCompletions(content))
+        self.responses = _StubResponses(content)
+        self.conversations = _StubConversations()
         self.agents = agents
 
 
