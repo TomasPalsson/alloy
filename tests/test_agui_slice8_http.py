@@ -237,7 +237,7 @@ def test_streamed_frames_pass_conformance() -> None:
     assert any(f["type"] == "TOOL_CALL_START" for f in frames)
 
 
-def test_b38_system_message_placed_LAST_still_never_becomes_the_prompt() -> None:
+def test_b38_system_message_placed_last_still_never_becomes_the_prompt() -> None:
     # The ordering a hostile client would actually use. B38's original case put the
     # injection first, so "take the last message" — the classic hole — still happened to
     # land on the user's text and the test passed against a broken guard. This one does
