@@ -55,6 +55,55 @@ async for event in agent.stream_async("Who is on call?"):
         print(event["data"], end="")
 ```
 
+## Hooks
+
+Four lifecycle events, matching Strands' `HookProvider`/`HookRegistry` shape:
+
+| Event | Fires |
+|---|---|
+| `BeforeInvocationEvent` | Once per `__call__`/`invoke_async`/`stream_async`, before any backend call |
+| `AfterInvocationEvent` | Once per call, after the final text is known |
+| `BeforeToolCallEvent` | Once per tool call, before the tool runs |
+| `AfterToolCallEvent` | Once per tool call, after its `ToolResult` exists |
+
+A `BeforeToolCallEvent` callback can act on the pending call two ways: set
+`event.cancel_tool = "<reason>"` to block it without running it, or replace `event.tool_use`
+to rewrite its arguments before it runs. An `AfterToolCallEvent` callback can replace
+`event.result` to change what goes back to the model.
+
+```python
+from alloy import Agent, tool
+from alloy.hooks import BeforeToolCallEvent, HookProvider, HookRegistry
+
+class Guardrail(HookProvider):
+    def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(BeforeToolCallEvent, self.block_destructive)
+
+    def block_destructive(self, event: BeforeToolCallEvent) -> None:
+        if event.tool_use.name.startswith("delete_"):
+            event.cancel_tool = "blocked by policy"
+
+agent = Agent(model="gpt-4o", tools=[...], hooks=[Guardrail()])
+```
+
+**Cancellation outranks an unknown tool name.** The check happens before the tool lookup, so
+a hook blocking `delete_prod` blocks it whether or not the agent actually holds a tool by that
+name — that's the useful semantics for a guardrail.
+
+**A cancelled call is not a failure.** `ToolResult.failure` is `None` for a cancelled call, and
+it never appears in `AgentResult.tool_failures` — a guardrail firing correctly is a decision,
+not an error.
+
+**A hook that raises propagates.** Callbacks run outside any try/except; a guardrail that
+fails silently is worse than no guardrail, so an exception raised inside a hook reaches your
+code unchanged.
+
+**Ordering.** `Before*` callbacks run in registration order; `After*` callbacks run in reverse
+registration order (LIFO), matching Strands — the last hook to see a call is the first to see
+its result. Callbacks are synchronous, called inline, on all three call paths.
+
+See `examples/hooks.py` for a runnable audit-and-guardrail demo.
+
 ## Design principles
 
 Borrowed from Strands, held as binding:
