@@ -6,7 +6,7 @@
 **Size**: Medium
 **Author**: Tomas Pálsson (via flow)
 **Created**: 2026-08-24
-**Version**: 1.2 (post harsh-judge fixes)
+**Version**: 1.3 (async surface completed)
 
 ---
 
@@ -31,6 +31,8 @@
 - No multi-agent orchestration — Foundry's equivalents are deprecated or sunset 2026-12-01.
 - No cross-process session persistence — history lives in the `Agent` instance.
 - No `hooks` or `callback_handler` — Strands has them; they do not earn their place in v1.
+- No native async client — `invoke_async` and `stream_async` reach the confirmed sync client through
+  `asyncio.to_thread`. `azure.ai.projects.aio` is only hinted at in the research, never verified.
 - No custom retry/backoff — `azure-ai-projects` has its own policy.
 - No typed wrappers for Foundry built-in tools (Code Interpreter, File Search, Bing) — their class names are unverified. Raw objects pass through instead.
 
@@ -116,8 +118,13 @@ print(result)          # stringifiable, like Strands
 result.text            # AZURE-SPECIFIC explicit accessor — Strands' AgentResult
                        # attributes were never confirmed in research, so we define a clean one
 
+result = await agent.invoke_async("...")   # Strands; async, no streaming
+
 async for event in agent.stream_async("..."):
-    ...                # dict events, Strands-shaped keys: data, message, current_tool_use, result
+    ...                # StreamEvent dicts, Strands-shaped keys: data, message,
+                       # current_tool_use, result
+
+agent.tool.get_oncall(team="data")   # Strands; run a held tool directly, no model call
 
 agent.messages         # Strands: in-memory conversation history
 ```
@@ -217,6 +224,10 @@ agent.messages         # Strands: in-memory conversation history
 | AC-030 | A backend yielding text deltas | `async for e in agent.stream_async("q")` | events with a `data` key arrive in order and concatenate to the full text | MUST |
 | AC-031 | A backend that does not support streaming | `stream_async` is used | `StreamingUnsupportedError` is raised, naming the backend limitation | MUST |
 | AC-032 | A streaming run that invokes a tool | streaming proceeds | a `current_tool_use` event is yielded before the tool result is submitted | SHOULD |
+| AC-033 | A running event loop | `await agent.invoke_async("q")` | an `AgentResult` is returned and the loop was never blocked (a concurrent task made progress during the call) | MUST |
+| AC-034 | A stream abandoned mid-iteration | the consumer breaks out of the `async for` | the worker thread terminates and no thread is left alive | MUST |
+| AC-042 | An agent holding a tool named `get_oncall` | `agent.tool.get_oncall(team="data")` | the function runs and returns its value with NO backend call made | MUST |
+| AC-043 | An agent holding no tool named `nope` | `agent.tool.nope()` | `UnknownToolError` naming the attribute | MUST |
 
 ---
 
@@ -242,6 +253,9 @@ agent.messages         # Strands: in-memory conversation history
 | FR-016 | System | MUST raise `VersionCapError` rather than a backend error when agent versions are exhausted, naming the agent and the cap | MUST | AC-023 |
 | FR-014 | System | MUST surface a named `BackendAuthError` when the backend rejects the caller's credential or its token has expired, without leaking the token value | MUST | AC-050, AC-051 |
 | FR-015 | System | SHOULD emit a `current_tool_use` event during a streaming run that invokes a tool | SHOULD | AC-032 |
+| FR-017 | SDK consumer | MUST be able to `await agent.invoke_async(prompt)` without blocking the event loop | MUST | AC-033 |
+| FR-018 | System | MUST terminate the streaming worker thread when the consumer abandons the stream | MUST | AC-034 |
+| FR-019 | SDK consumer | MUST be able to invoke a held tool directly via `agent.tool.<name>(**kwargs)` with no backend call | MUST | AC-042, AC-043 |
 
 ### 4.2 Data Requirements
 
@@ -309,9 +323,9 @@ All tests MUST pass with no Azure credentials and no network access, via a fake 
 
 | ID | Assumption | Confidence | If wrong |
 |----|------------|-----------|----------|
-| A-1 | The Responses API function-call round-trip uses OpenAI's shape (`function_call` items; `function_call_output` submitted back). | Medium | Reworks one module only, by 5.3's DIP boundary. |
-| A-2 | `responses.create(stream=True)` works against a Foundry-hosted agent. | **Low** | FR-011 covers it: `StreamingUnsupportedError`, documented. |
-| A-3 | `project.agents.list_versions` exists and is callable for reuse. | Medium | FR-009 covers it: create + warn. |
+| A-1 | ~~Round-trip uses OpenAI's shape~~ **CONFIRMED LIVE 2026-08-25** — tool executed, secret value returned through the model. | Verified | n/a — resolved |
+| A-2 | ~~`stream=True` works~~ **CONFIRMED LIVE 2026-08-25** — 11 incremental chunks received from a real Foundry agent. | Verified | n/a — resolved |
+| A-3 | ~~`list_versions` exists~~ **VERIFIED** against installed SDK 2.5.0, with `metadata` on `create_version` to carry the fingerprint. | High | n/a — resolved |
 | A-4 | `gpt-4o` is deployed in the target project. | High | Configurable; `iac/` deploys it. |
 | A-5 | `get_openai_client()` returns a genuine `openai.OpenAI`, so the OpenAI SDK's client-side shapes apply even where Foundry's server behaviour is unverified. | High | Confirmed by SDK source inspection in research. |
 
@@ -321,6 +335,6 @@ All tests MUST pass with no Azure credentials and no network access, via a fake 
 
 | ID | Question | Blocking? | Resolution |
 |----|----------|-----------|------------|
-| Q-1 | Exact function-call item shape on Foundry's Responses API. | No — isolated behind the backend protocol | One live call after `az login`; print `response.output`. |
-| Q-2 | Whether `stream=True` works against Foundry. | No — FR-011 degrades honestly | Live smoke test. |
-| Q-3 | Signature of `project.agents.list_versions`. | No — FR-009 degrades | `inspect.signature` on the installed SDK. |
+| Q-1 | ~~Function-call item shape~~ **RESOLVED LIVE**: `type="function_call"`, `call_id`, `name`, `arguments` (JSON string). | Closed | — |
+| Q-2 | ~~Whether `stream=True` works~~ **RESOLVED LIVE**: it does. | Closed | — |
+| Q-3 | ~~Signature of `list_versions`~~ **RESOLVED** 2026-08-24: `list_versions(agent_name, *, limit, order, before, include_drafts)`. | Closed | — |
