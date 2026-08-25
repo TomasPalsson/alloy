@@ -33,7 +33,16 @@
 
 **MVP cut line**: Everything in Section 4 tagged `MUST` ships for v1. `SHOULD` items are v1.1 candidates.
 
-**Key decision**: AG-UI types come from the real `ag-ui-protocol` SDK behind an optional extra (`alloy-foundry[agui]`), not hand-rolled. alloy's zero-dependency core is preserved for users who do not install the extra; users who do get protocol conformance from upstream instead of maintaining 33 event types and their camelCase wire aliases by hand.
+**Key decision**: AG-UI types come from the real `ag-ui-protocol` SDK behind an optional extra
+(`alloy-foundry[agui]`), not hand-rolled. Users who install it get protocol conformance from
+upstream instead of hand-maintaining 33 event types and their camelCase wire aliases.
+
+> **Correction, 2026-08-25.** This decision was first argued as "keeps pydantic out of the core".
+> That premise was false and is withdrawn: `azure-ai-projects` requires `openai`, which requires
+> `pydantic`, so every alloy install has always had pydantic. Measured, not assumed. The decision
+> stands on a different and better reason — `ag-ui-protocol` is **0.1.20, pre-1.0, and churning**
+> (0.1.21 dev builds already exist, and the event count moved from 33 to 36 on main). Pinning a
+> volatile pre-1.0 package into the base install is the real cost avoided here.
 
 ---
 
@@ -69,7 +78,7 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 | Option | Status | Why rejected / why not this |
 |--------|--------|-----------------------------|
 | Hand-roll the wire format from stdlib dataclasses | Rejected | 33 event types with camelCase wire aliases, and conformance becomes a permanent maintenance tax. Not "a few lines". |
-| Hard dependency on `ag-ui-protocol` | Rejected | Forces pydantic v2 on every alloy user; destroys the two-dependency core that is currently a selling point. |
+| Hard dependency on `ag-ui-protocol` | Rejected | ~~Forces pydantic on every user~~ — false, see the TL;DR correction; pydantic already ships via `openai`. Rejected instead because it pins a pre-1.0, fast-moving package into every install. |
 | **Optional extra `alloy-foundry[agui]`** | **Selected** | Matches Pydantic AI's own precedent (`pydantic-ai-slim[ag-ui]`). Core stays clean; AG-UI users get upstream conformance. |
 | Return an ASGI app like Pydantic AI's `AGUIAdapter` | Rejected | ASGI needs starlette. alloy's server is stdlib-only. alloy exposes a transport-agnostic event iterator instead, and the stdlib server consumes it. |
 | Ship a CopilotKit React app for verification | Rejected | Drags npm into a Python library. A single dependency-free HTML page proves the same thing. |
@@ -219,7 +228,9 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 
 **Happy path**:
 1. User installs `alloy-foundry`.
-2. `pip show` confirms only `azure-ai-projects` and `azure-identity` as dependencies. pydantic is absent.
+2. `pip show` confirms the direct dependencies are still exactly `azure-ai-projects` and
+   `azure-identity` — `ag-ui-protocol` is absent. pydantic is present, as it already was: it
+   arrives via `azure-ai-projects` → `openai` → `pydantic`, and always has.
 3. `import alloy`, `Agent`, `tool` and `alloy.hooks` all work exactly as before.
 
 **Error path — user imports `alloy.agui` without the extra**:
@@ -235,10 +246,10 @@ Meanwhile AG-UI has become the de-facto standard for exactly this seam, with in-
 
 | ID | Given | When | Then | Priority |
 |----|-------|------|------|----------|
-| AC-20 | alloy installed without the extra | `import alloy`, `alloy.hooks`, `Agent`, `tool` are exercised | All succeed, and no `ag_ui` or `pydantic` module is imported | MUST |
+| AC-20 | alloy installed without the extra | `import alloy`, `alloy.hooks`, `Agent`, `tool` are exercised | All succeed and `ag_ui` is absent from `sys.modules`. **Not** asserted for `pydantic`: `azure-ai-projects` requires `openai`, which requires `pydantic<3,>=1.10.13`, so a bare `import alloy` has ALWAYS loaded pydantic — measured 2026-08-25 | MUST |
 | AC-21 | alloy installed without the extra | `import alloy.agui` runs | An `ImportError` is raised whose message contains the literal string `alloy-foundry[agui]` | MUST |
 | AC-22 | alloy installed with the extra | `import alloy.agui` runs | It succeeds and every name in its `__all__` is importable | MUST |
-| AC-23 | Package metadata | `pyproject.toml` is read | `[project.optional-dependencies]` defines `agui`, and `[project].dependencies` does NOT list `ag-ui-protocol` or `pydantic` | MUST |
+| AC-23 | Package metadata | `pyproject.toml` is read | `[project.optional-dependencies]` defines `agui`, and `[project].dependencies` is EXACTLY `azure-ai-projects` and `azure-identity` — unchanged from before this build | MUST |
 
 ---
 
