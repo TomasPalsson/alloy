@@ -83,7 +83,30 @@ def seed_state(run_input: ag_ui_core.RunAgentInput) -> dict[str, Any]:
     Returns:
         The seeded state dict.
     """
-    raise NotImplementedError
+    # AG-UI state is bidirectional by design — a frontend writes state and expects it back
+    # — so a client's own keys pass through untouched. What does NOT pass through are the
+    # three collections alloy maintains: letting a client pre-populate those would let it
+    # fake tool activity in the transcript a frontend renders. A non-dict `state` has no
+    # keys to keep and is replaced rather than rejected.
+    raw_state: Any = run_input.state
+    seeded: dict[str, Any] = (
+        {str(key): value for key, value in cast("dict[Any, Any]", raw_state).items()}
+        if isinstance(raw_state, dict)
+        else {}
+    )
+    if "messages" not in seeded:
+        seeded["messages"] = [
+            {
+                "id": message.id,
+                "role": message.role,
+                "content": message.content if isinstance(message.content, str) else "",
+            }
+            for message in run_input.messages
+        ]
+    seeded["activeToolCalls"] = {}
+    seeded["completedToolCalls"] = []
+    seeded["toolFailures"] = []
+    return seeded
 
 
 def json_safe(value: Any) -> Any:
@@ -95,7 +118,15 @@ def json_safe(value: Any) -> Any:
     Returns:
         A JSON-encodable equivalent of `value`.
     """
-    raise NotImplementedError
+    if value is None or isinstance(value, str | bool | int | float):
+        return value
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in cast("dict[Any, Any]", value).items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(v) for v in cast("list[Any]", value)]
+    # Stringified rather than raising: state is rendered, not executed, and a run that
+    # dies at encode time is worse than one that shows a repr.
+    return str(value)
 
 
 _TERMINAL_TYPES = frozenset((ag_ui_core.EventType.RUN_FINISHED, ag_ui_core.EventType.RUN_ERROR))
@@ -287,6 +318,48 @@ def _tool_result_event(result: contracts.ToolResult) -> ag_ui_core.ToolCallResul
     )
 
 
+def _completion_delta(
+    run_state: _RunState, result: contracts.ToolResult
+) -> ag_ui_core.StateDeltaEvent:
+    """Move one tool call from active to completed as ONE delta event.
+
+    Both ops travel together deliberately: split across two events, a frontend applying
+    them in order renders a frame where the call sits in neither collection and its card
+    blinks out. Every test that only replays to the FINAL state passes either way, which
+    is why this is a rule and not a preference.
+    """
+    # Read the name off the active entry before removing it: a ToolResult carries only the
+    # call id, and a frontend rendering "restart_service failed" needs the name.
+    active = cast("dict[str, Any]", run_state.state["activeToolCalls"])
+    name = cast("dict[str, Any]", active.get(result.call_id, {})).get("name", "")
+    ops = [
+        run_state.apply("remove", f"/activeToolCalls/{result.call_id}"),
+        run_state.apply(
+            "add",
+            "/completedToolCalls/-",
+            {
+                "toolCallId": result.call_id,
+                "name": name,
+                "output": result.output,
+                "failed": result.failure is not None,
+            },
+        ),
+    ]
+    if result.failure is not None:
+        ops.append(
+            run_state.apply(
+                "add",
+                "/toolFailures/-",
+                {
+                    "toolCallId": result.call_id,
+                    "error": type(result.failure).__name__,
+                    "message": str(result.failure),
+                },
+            )
+        )
+    return ag_ui_core.StateDeltaEvent(delta=ops)
+
+
 async def run_stream(
     agent: Agent, run_input: ag_ui_core.RunAgentInput
 ) -> AsyncIterator[ag_ui_core.BaseEvent]:
@@ -308,6 +381,9 @@ async def run_stream(
         AG-UI events in wire order.
     """
     yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
+    run_state = _RunState(seed_state(run_input))
+    run_state.phase = "OPEN"
+    yield ag_ui_core.StateSnapshotEvent(snapshot=json_safe(run_state.state))
     message_id: str | None = None
     # Populated by _record_result, which fires on agent.hooks - possibly nested inside
     # agent.stream_async's own frame, never inside this generator's own body, so it can't
@@ -332,6 +408,7 @@ async def run_stream(
         async for event in agent.stream_async(prompt):
             for result in _drain():
                 yield _tool_result_event(result)
+                yield _completion_delta(run_state, result)
 
             if "tool_call_started" in event:
                 started = cast(contracts.ToolCall, event["tool_call_started"])
@@ -341,6 +418,15 @@ async def run_stream(
                 opened_tool_call_ids.add(started.call_id)
                 yield ag_ui_core.ToolCallStartEvent(
                     tool_call_id=started.call_id, tool_call_name=started.name
+                )
+                yield ag_ui_core.StateDeltaEvent(
+                    delta=[
+                        run_state.apply(
+                            "add",
+                            f"/activeToolCalls/{started.call_id}",
+                            {"name": started.name, "arguments": ""},
+                        )
+                    ]
                 )
                 continue
 
@@ -367,6 +453,16 @@ async def run_stream(
                 )
                 yield ag_ui_core.ToolCallArgsEvent(tool_call_id=call.call_id, delta=call.arguments)
                 yield ag_ui_core.ToolCallEndEvent(tool_call_id=call.call_id)
+                opened_tool_call_ids.add(call.call_id)
+                yield ag_ui_core.StateDeltaEvent(
+                    delta=[
+                        run_state.apply(
+                            "add",
+                            f"/activeToolCalls/{call.call_id}",
+                            {"name": call.name, "arguments": call.arguments},
+                        )
+                    ]
+                )
                 continue
 
             if "data" not in event:
@@ -378,6 +474,7 @@ async def run_stream(
     except Exception as exc:
         for result in _drain():
             yield _tool_result_event(result)
+            yield _completion_delta(run_state, result)
         if message_id is not None:
             yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
         yield ag_ui_core.RunErrorEvent(message=str(exc))
@@ -386,6 +483,7 @@ async def run_stream(
         agent.hooks.remove_callback(AfterToolCallEvent, _record_result)
     for result in _drain():
         yield _tool_result_event(result)
+        yield _completion_delta(run_state, result)
     if message_id is not None:
         yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
     yield ag_ui_core.RunFinishedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
@@ -415,10 +513,38 @@ class ThreadStore:
         raise NotImplementedError
 
 
-class _RunState:  # pyright: ignore[reportUnusedClass] - unused until a later slice wires it in
-    """One run's bracketing/state-patch phase. Private; not part of the public surface."""
+def _step_into(node: Any, token: str) -> Any:
+    """Follow one JSON Pointer token into `node`, list index or dict key.
 
-    phase: Literal["NOT_STARTED", "OPEN", "TEXT_OPEN", "FINISHED", "ERRORED"]
+    A declared `Any` return keeps the walk honest: the shape being walked is genuinely
+    unknown, and pretending otherwise is what makes strict mode complain.
+    """
+    if isinstance(node, list):
+        return cast("list[Any]", node)[int(token)]
+    return cast("dict[str, Any]", node)[token]
+
+
+class _RunState:
+    """One run's frontend-visible state, and the phase its brackets are in.
+
+    Private. Every mutation goes through `apply`, which changes the state and returns the
+    patch describing that change in one step — nothing diffs two dictionaries. A write
+    that bypasses `apply` is silently missing from the stream, which is the whole cost of
+    this approach and the reason it is the only door.
+    """
+
+    def __init__(self, state: dict[str, Any]) -> None:
+        """Start a run at `NOT_STARTED` over `state`.
+
+        Args:
+            state: The seeded state this run mutates.
+        """
+        self.state = state
+        # Assigned, not merely annotated: an annotation alone leaves the attribute absent
+        # and the first read raises AttributeError.
+        self.phase: Literal["NOT_STARTED", "OPEN", "TEXT_OPEN", "FINISHED", "ERRORED"] = (
+            "NOT_STARTED"
+        )
 
     def apply(self, op: str, path: str, value: Any = None) -> dict[str, Any]:
         """Apply one JSON Patch operation to this run's state, returning the delta.
@@ -431,4 +557,29 @@ class _RunState:  # pyright: ignore[reportUnusedClass] - unused until a later sl
         Returns:
             The JSON Patch operation as emitted on the wire.
         """
-        raise NotImplementedError
+        tokens = [token.replace("~1", "/").replace("~0", "~") for token in path.split("/")[1:]]
+        target: Any = self.state
+        for token in tokens[:-1]:
+            target = _step_into(target, token)
+        last = tokens[-1]
+
+        if op == "remove":
+            # A list index must SPLICE. `del` is right for a dict key, but using it on a
+            # list index would leave a hole and the client's replay would diverge.
+            if isinstance(target, list):
+                cast("list[Any]", target).pop(int(last))
+            else:
+                del cast("dict[str, Any]", target)[last]
+            return {"op": op, "path": path}
+
+        if isinstance(target, list):
+            items = cast("list[Any]", target)
+            if last == "-":
+                items.append(value)
+            elif op == "add":
+                items.insert(int(last), value)
+            else:
+                items[int(last)] = value
+        else:
+            cast("dict[str, Any]", target)[last] = value
+        return {"op": op, "path": path, "value": value}

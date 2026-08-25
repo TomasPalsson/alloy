@@ -86,6 +86,13 @@ def _json_pointer_parts(pointer: str) -> list[str]:
     return [p.replace("~1", "/").replace("~0", "~") for p in pointer.split("/")[1:]]
 
 
+def _step(node: Any, token: str) -> Any:
+    """Follow one JSON Pointer token into an untyped document."""
+    if isinstance(node, list):
+        return cast("list[Any]", node)[int(token)]
+    return cast("dict[str, Any]", node)[token]
+
+
 def _apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
     """Apply an RFC 6902 add/replace/remove subset to `doc` in place, returning it.
 
@@ -98,16 +105,17 @@ def _apply_patch(doc: Any, ops: list[dict[str, Any]]) -> Any:
         parts = _json_pointer_parts(path)
         parent: Any = doc
         for part in parts[:-1]:
-            parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+            parent = _step(parent, part)
         key = parts[-1]
         if kind == "add":
             if isinstance(parent, list):
-                parent.insert(len(parent) if key == "-" else int(key), op["value"])
+                items = cast("list[Any]", parent)
+                items.insert(len(items) if key == "-" else int(key), op["value"])
             else:
-                parent[key] = op["value"]
+                cast("dict[str, Any]", parent)[key] = op["value"]
         elif kind == "replace":
             if isinstance(parent, list):
-                parent[int(key)] = op["value"]
+                cast("list[Any]", parent)[int(key)] = op["value"]
             else:
                 parent[key] = op["value"]
         elif kind == "remove":
@@ -197,7 +205,7 @@ def test_b25_snapshot_plus_ordered_deltas_replay_to_the_finished_state() -> None
     for delta_event in deltas:
         replayed = _apply_patch(replayed, delta_event.delta)
 
-    expected_final_state = {
+    expected_final_state: dict[str, Any] = {
         # No transition in design §9's table mutates `messages`; it stays exactly what
         # seeding produced.
         "messages": snapshots[0].snapshot["messages"],
@@ -263,7 +271,9 @@ def test_b26_every_state_delta_is_a_list_of_add_replace_or_remove_ops() -> None:
 
 def test_b27_tool_outcome_reaches_state_and_a_failure_lands_in_both_collections() -> None:
     fake = _FakeAgentWithHooks()
-    call = ToolCall(call_id="call-fail", name="restart_service", arguments='{"service": "auth-api"}')
+    call = ToolCall(
+        call_id="call-fail", name="restart_service", arguments='{"service": "auth-api"}'
+    )
     failure = RuntimeError("connection refused")
     result = ToolResult(
         call_id="call-fail", output=json.dumps({"error": str(failure)}), failure=failure
@@ -307,7 +317,12 @@ def test_b28_non_object_run_input_state_is_replaced_not_rejected(bad_state: obje
     run_input = _run_input(messages=[_user_message("status?")], state=bad_state)
     expected_state = agui.seed_state(run_input)
     assert isinstance(expected_state, dict)
-    assert set(expected_state) == {"messages", "activeToolCalls", "completedToolCalls", "toolFailures"}
+    assert set(expected_state) == {
+        "messages",
+        "activeToolCalls",
+        "completedToolCalls",
+        "toolFailures",
+    }
 
     events = asyncio.run(_collect(fake, run_input))
     agui.check_conformance(events)
@@ -352,3 +367,47 @@ def test_b29_non_serialisable_state_value_is_coerced_not_raised() -> None:
     # against a raw unserialisable object in `snapshot` before writing this assertion.
     encoded = snapshots[0].model_dump_json()
     assert str(weird) in encoded
+
+
+def test_tool_completion_is_one_delta_so_it_is_never_in_neither_collection() -> None:
+    # B25 replays every delta and compares only the FINAL state, so it cannot see a bad
+    # intermediate. Split the remove and the append across two events and every other test
+    # here still passes, while a real frontend renders a frame where the tool card has
+    # vanished from both collections. This walks the deltas one at a time to catch that.
+    fake = _FakeAgentWithHooks()
+    call = ToolCall(call_id="call-a", name="check_service_status", arguments='{"s":"x"}')
+    result = ToolResult(call_id="call-a", output="degraded")
+    fake.steps = [
+        {"current_tool_use": call},
+        AfterToolCallEvent(agent=cast(Agent, fake), tool_use=call, result=result),
+        {"result": AgentResult(text="checked")},
+    ]
+    run_input = _run_input(messages=[_user_message("status?")])
+
+    events = asyncio.run(_collect(fake, run_input))
+    agui.check_conformance(events)
+
+    snapshots = [e for e in events if isinstance(e, ag_ui_core.StateSnapshotEvent)]
+    replayed: dict[str, Any] = json.loads(json.dumps(snapshots[0].snapshot))
+    # Ids that have ENTERED state. A call is legitimately in no collection between its
+    # TOOL_CALL_START and its own add-delta — a frontend renders that card from the event,
+    # not from state. What must never happen is a call LEAVING active without arriving in
+    # completed in the same breath.
+    in_state: set[str] = set()
+
+    for event in events:
+        if not isinstance(event, ag_ui_core.StateDeltaEvent):
+            continue
+        replayed = _apply_patch(replayed, event.delta)
+        active = cast("dict[str, Any]", replayed["activeToolCalls"])
+        completed = {
+            entry["toolCallId"]
+            for entry in cast("list[dict[str, Any]]", replayed["completedToolCalls"])
+        }
+        in_state |= set(active) | completed
+        for tool_call_id in in_state:
+            assert tool_call_id in active or tool_call_id in completed, (
+                f"{tool_call_id} left activeToolCalls without arriving in "
+                f"completedToolCalls in the same delta - a frontend applying these in "
+                f"order renders a frame with its card gone"
+            )

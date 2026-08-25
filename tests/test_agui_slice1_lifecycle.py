@@ -99,9 +99,16 @@ def test_b3_agent_raises_emits_run_error_and_nothing_else_follows() -> None:
 
     events = asyncio.run(_collect(fake, run_input))
 
-    assert len(events) == 2  # RunStartedEvent, then RunErrorEvent, nothing more
+    # Slice 6 added a STATE_SNAPSHOT to every run, so the error path is three events:
+    # RUN_STARTED, STATE_SNAPSHOT, RUN_ERROR. What this test guards is that nothing
+    # follows the terminal event, not the raw count.
     assert isinstance(events[-1], ag_ui_core.RunErrorEvent)
     assert events[-1].message == "boom"
+    assert [type(e).__name__ for e in events] == [
+        "RunStartedEvent",
+        "StateSnapshotEvent",
+        "RunErrorEvent",
+    ]
 
 
 def test_b4_run_finished_not_emitted_when_run_errors() -> None:
