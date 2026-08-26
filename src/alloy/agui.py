@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import re
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
@@ -437,7 +437,7 @@ def _completion_delta(
 
 async def run_stream(
     agent: Agent, run_input: ag_ui_core.RunAgentInput
-) -> AsyncIterator[ag_ui_core.BaseEvent]:
+) -> AsyncGenerator[ag_ui_core.BaseEvent, None]:
     """Run `agent` against `run_input` and yield the AG-UI event stream.
 
     Every run is bracketed: `RunStartedEvent` first, then exactly one of
@@ -454,6 +454,10 @@ async def run_stream(
 
     Yields:
         AG-UI events in wire order.
+
+    Declared as an `AsyncGenerator`, not an `AsyncIterator`, so the type itself tells a
+    caller `aclose()` exists. A consumer that abandons this stream — a disconnecting
+    client — should close it, and one that cannot see the method will not.
     """
     yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
     # Built defensively: seeding reads client-supplied state, so a hostile body must not
