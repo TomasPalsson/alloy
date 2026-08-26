@@ -100,3 +100,94 @@ def test_run_error_still_says_something_useful_after_redaction() -> None:
     )
     errors = [e for e in events if e.type == ag_ui_core.EventType.RUN_ERROR]
     assert "service unavailable" in errors[0].message
+
+
+def test_rule_8_holds_in_both_directions_not_just_one() -> None:
+    # run_stream closed an open TEXT message before opening a tool call, but never closed
+    # an open TOOL CALL before opening text. It therefore emitted a stream its own
+    # conformance oracle rejects:
+    #   rule 8 violated: a text message may not open while a tool call is open
+    # The existing test only exercised the handled direction.
+    from alloy import contracts
+
+    class _Interleaving:
+        def __init__(self) -> None:
+            self.hooks = HookRegistry()
+            self.conversation_id: str | None = None
+
+        async def stream_async(self, prompt: str) -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "tool_call_started": contracts.ToolCall(call_id="c1", name="check", arguments="")
+            }
+            yield {"data": "thinking out loud"}
+            yield {
+                "current_tool_use": contracts.ToolCall(call_id="c1", name="check", arguments="{}")
+            }
+            yield {"result": contracts.AgentResult(text="done")}
+
+    events = asyncio.run(_collect(_Interleaving(), _run_input()))
+    agui.check_conformance(events)
+
+    types = [e.type.value for e in events]
+    assert types.index("TOOL_CALL_END") < types.index("TEXT_MESSAGE_START"), (
+        "an open tool call must be closed before a text message opens, or a real client "
+        "rejects the stream"
+    )
+
+
+def test_a_closed_tool_call_is_not_closed_twice() -> None:
+    # Closing early to satisfy rule 8 must not then double-close when the completing
+    # event arrives — that would be a rule 6 violation instead.
+    from alloy import contracts
+
+    class _Interleaving:
+        def __init__(self) -> None:
+            self.hooks = HookRegistry()
+            self.conversation_id: str | None = None
+
+        async def stream_async(self, prompt: str) -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "tool_call_started": contracts.ToolCall(call_id="c1", name="check", arguments="")
+            }
+            yield {"data": "text forces the close"}
+            yield {
+                "current_tool_use": contracts.ToolCall(call_id="c1", name="check", arguments="{}")
+            }
+            yield {"result": contracts.AgentResult(text="done")}
+
+    events = asyncio.run(_collect(_Interleaving(), _run_input()))
+    ends = [e for e in events if e.type == ag_ui_core.EventType.TOOL_CALL_END]
+    assert len(ends) == 1, f"expected one TOOL_CALL_END, got {len(ends)}"
+
+
+def test_abandoning_the_stream_closes_the_agents_own_iterator() -> None:
+    # A client disconnect abandons run_stream part-way. `async for` does NOT close what it
+    # iterates, so without an explicit aclose the agent's stream_async never runs its own
+    # `finally` — and in the real Agent that finally is what stops a worker thread. The
+    # leaked thread then spins for the life of the process. Reproduced live before the
+    # fix: the repro hung until killed, with an `asyncio_0` thread still running.
+    closed = {"inner": False}
+
+    class _TracksClosure:
+        def __init__(self) -> None:
+            self.hooks = HookRegistry()
+            self.conversation_id: str | None = None
+
+        async def stream_async(self, prompt: str) -> AsyncIterator[dict[str, Any]]:
+            try:
+                for index in range(1000):
+                    yield {"data": f"chunk{index} "}
+            finally:
+                closed["inner"] = True
+
+    async def abandon() -> None:
+        stream = agui.run_stream(cast(Any, _TracksClosure()), _run_input())
+        for _ in range(3):
+            await stream.__anext__()
+        await stream.aclose()
+
+    asyncio.run(abandon())
+    assert closed["inner"], (
+        "the agent's own stream_async finally never ran, so whatever it cleans up — a "
+        "worker thread, in the real Agent — was leaked"
+    )

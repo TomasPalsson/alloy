@@ -132,12 +132,14 @@ def _agui_frames(run_input: Any, agent_factory: Callable[..., Agent]) -> Iterato
     thread_id = run_input.thread_id
     agent = agent_factory(conversation_id=THREADS.resolve(thread_id))
     loop = asyncio.new_event_loop()
+    stream = run_stream(agent, run_input)
+    drained = False
     try:
-        stream = run_stream(agent, run_input)
         while True:
             try:
                 event = loop.run_until_complete(stream.__anext__())
             except StopAsyncIteration:
+                drained = True
                 break
             yield encoder.encode(event)
         # Recorded after the run, not before: the id is minted lazily on the first backend
@@ -146,6 +148,16 @@ def _agui_frames(run_input: Any, agent_factory: Callable[..., Agent]) -> Iterato
         if conversation_id is not None:
             THREADS.remember(thread_id, conversation_id)
     finally:
+        # A client that disconnects abandons this generator part-way. Python does NOT
+        # auto-close what an `async for` iterates, so without this explicit aclose()
+        # `stream_async`'s own `finally` never runs and its worker thread is left spinning
+        # for the life of the process. Closing the loop first would make the cleanup
+        # unrunnable, so the order here is load-bearing.
+        if not drained:
+            try:
+                loop.run_until_complete(stream.aclose())
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
         loop.close()
 
 

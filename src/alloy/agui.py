@@ -476,6 +476,10 @@ async def run_stream(
     # Tool calls whose TOOL_CALL_START already went out, so `current_tool_use` knows to
     # only close them rather than re-emit the whole bracket.
     opened_tool_call_ids: set[str] = set()
+    # Still-open brackets. Rule 8 is symmetric: text must close a tool call just as a tool
+    # call closes text. Enforcing only one direction emitted streams this module's own
+    # check_conformance rejects.
+    open_tool_call_ids: set[str] = set()
 
     def _record_result(event: AfterToolCallEvent) -> None:
         pending_results.append(event.result)
@@ -486,9 +490,13 @@ async def run_stream(
         return drained
 
     agent.hooks.add_callback(AfterToolCallEvent, _record_result)
+    # Held so it can be closed explicitly below. `async for` does NOT close what it
+    # iterates, so a consumer abandoning THIS generator would otherwise leave
+    # stream_async's own `finally` unrun and its worker thread spinning for the life of
+    # the process.
+    inner = agent.stream_async(latest_user_prompt(run_input))
     try:
-        prompt = latest_user_prompt(run_input)
-        async for event in agent.stream_async(prompt):
+        async for event in inner:
             for result in _drain():
                 yield _tool_result_event(result)
                 yield _completion_delta(run_state, result)
@@ -499,6 +507,7 @@ async def run_stream(
                     yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
                     message_id = None
                 opened_tool_call_ids.add(started.call_id)
+                open_tool_call_ids.add(started.call_id)
                 yield ag_ui_core.ToolCallStartEvent(
                     tool_call_id=started.call_id, tool_call_name=started.name
                 )
@@ -524,7 +533,11 @@ async def run_stream(
                     # Bracket already open and its arguments already streamed; this event
                     # only closes it. Re-emitting ARGS would repeat the whole payload after
                     # the fragments that already carried it.
-                    yield ag_ui_core.ToolCallEndEvent(tool_call_id=call.call_id)
+                    if call.call_id in open_tool_call_ids:
+                        open_tool_call_ids.discard(call.call_id)
+                        yield ag_ui_core.ToolCallEndEvent(tool_call_id=call.call_id)
+                    # Already closed early to let text through — closing again would be a
+                    # rule 6 violation instead.
                     continue
                 # No start event arrived, so the call was delivered whole rather than
                 # streamed. Emit the complete bracket from this one event.
@@ -550,11 +563,20 @@ async def run_stream(
 
             if "data" not in event:
                 continue
+            # Close any open tool call FIRST. The reference client rejects every event
+            # while a tool call is open, so text arriving mid-call must end the bracket
+            # rather than open a second one alongside it.
+            for open_call_id in sorted(open_tool_call_ids):
+                yield ag_ui_core.ToolCallEndEvent(tool_call_id=open_call_id)
+            open_tool_call_ids.clear()
             if message_id is None:
                 message_id = uuid4().hex
                 yield ag_ui_core.TextMessageStartEvent(message_id=message_id)
             yield ag_ui_core.TextMessageContentEvent(message_id=message_id, delta=event["data"])
     except Exception as exc:
+        for open_call_id in sorted(open_tool_call_ids):
+            yield ag_ui_core.ToolCallEndEvent(tool_call_id=open_call_id)
+        open_tool_call_ids.clear()
         for result in _drain():
             yield _tool_result_event(result)
             yield _completion_delta(run_state, result)
@@ -564,6 +586,12 @@ async def run_stream(
         return
     finally:
         agent.hooks.remove_callback(AfterToolCallEvent, _record_result)
+        aclose = getattr(inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    for open_call_id in sorted(open_tool_call_ids):
+        yield ag_ui_core.ToolCallEndEvent(tool_call_id=open_call_id)
+    open_tool_call_ids.clear()
     for result in _drain():
         yield _tool_result_event(result)
         yield _completion_delta(run_state, result)
