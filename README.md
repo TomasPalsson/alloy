@@ -127,8 +127,8 @@ Two entry points. A transport-agnostic translator:
 from alloy import Agent
 from alloy.agui import run_stream, parse_run_input
 
-run_input = parse_run_input(request_body)          # bytes -> RunAgentInput
-async for event in run_stream(agent, run_input):   # -> AG-UI events
+run_input = parse_run_input(request_body)  # bytes -> RunAgentInput
+async for event in run_stream(agent, run_input):  # -> AG-UI events
     ...
 ```
 

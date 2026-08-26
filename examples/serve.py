@@ -94,7 +94,7 @@ def dispatch(
 
 
 def _handle_agui(
-    raw_body: bytes, agent_factory: Callable[[], Agent]
+    raw_body: bytes, agent_factory: Callable[..., Agent]
 ) -> tuple[int, dict[str, Any]] | Iterator[str]:
     """Answer one AG-UI run: parse, validate, then stream protocol events.
 
@@ -120,10 +120,17 @@ def _handle_agui(
     return _agui_frames(run_input, agent_factory)
 
 
-def _agui_frames(run_input: Any, agent_factory: Callable[[], Agent]) -> Iterator[str]:
-    """Drive `run_stream` on a private event loop, encoding each event to the wire."""
+def _agui_frames(run_input: Any, agent_factory: Callable[..., Agent]) -> Iterator[str]:
+    """Drive `run_stream` on a private event loop, encoding each event to the wire.
+
+    Resolves the thread's conversation BEFORE building the agent, because an agent's
+    conversation is fixed at construction. Without this the store is dead weight: every
+    request gets a fresh conversation and the agent forgets everything after the first
+    message.
+    """
     encoder = EventEncoder()
-    agent = agent_factory()
+    thread_id = run_input.thread_id
+    agent = agent_factory(conversation_id=THREADS.resolve(thread_id))
     loop = asyncio.new_event_loop()
     try:
         stream = run_stream(agent, run_input)
@@ -131,8 +138,13 @@ def _agui_frames(run_input: Any, agent_factory: Callable[[], Agent]) -> Iterator
             try:
                 event = loop.run_until_complete(stream.__anext__())
             except StopAsyncIteration:
-                return
+                break
             yield encoder.encode(event)
+        # Recorded after the run, not before: the id is minted lazily on the first backend
+        # call, so before the stream drains there is nothing to remember.
+        conversation_id = agent.conversation_id
+        if conversation_id is not None:
+            THREADS.remember(thread_id, conversation_id)
     finally:
         loop.close()
 
@@ -248,13 +260,14 @@ class AuditLog(HookProvider):
         print(f"[audit] <- {event.tool_use.name} {outcome}", file=sys.stderr)
 
 
-def _build_agent() -> Agent:
+def _build_agent(conversation_id: str | None = None) -> Agent:
     """Build one fresh Agent for a single request (see the module docstring on why).
 
     Carries a tool and an audit hook so the server demonstrates both — a bare agent
     would exercise the HTTP plumbing without exercising anything alloy adds.
     """
     return Agent(
+        conversation_id=conversation_id,
         model="gpt-5-mini",
         system_prompt=(
             "You are an on-call assistant reachable over HTTP. "

@@ -35,9 +35,7 @@ def test_b44_human_in_the_loop_is_not_claimed() -> None:
 
 def test_b44_multi_agent_is_not_claimed() -> None:
     declared = agui.capabilities()
-    assert (
-        declared.multi_agent is None or declared.multi_agent.model_dump(exclude_none=True) == {}
-    )
+    assert declared.multi_agent is None or declared.multi_agent.model_dump(exclude_none=True) == {}
 
 
 def test_b44_multimodal_is_not_claimed() -> None:
