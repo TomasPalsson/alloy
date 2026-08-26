@@ -35,6 +35,7 @@ and tool calls looks legal under rules 1-7 alone and is still refused by a real 
 from __future__ import annotations
 
 import json
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -63,6 +64,7 @@ __all__ = [
     "json_safe",
     "latest_user_prompt",
     "parse_run_input",
+    "redact_secrets",
     "run_stream",
     "seed_state",
 ]
@@ -126,24 +128,66 @@ def seed_state(run_input: ag_ui_core.RunAgentInput) -> dict[str, Any]:
     return seeded
 
 
-def json_safe(value: Any) -> Any:
+# Deep enough for any state a frontend actually renders, shallow enough that a hostile
+# body cannot exhaust the stack. A ~6KB request nesting 3000 levels used to raise
+# RecursionError out of the generator before the run could emit a terminal event.
+_MAX_STATE_DEPTH = 64
+
+
+def json_safe(value: Any, _depth: int = 0) -> Any:
     """Coerce `value` into something `json.dumps` can encode without raising.
 
     Args:
         value: Any Python value that may appear in agent state.
+        _depth: Recursion depth, bounded at `_MAX_STATE_DEPTH`. Internal.
 
     Returns:
-        A JSON-encodable equivalent of `value`.
+        A JSON-encodable equivalent of `value`. Anything nested past the depth limit is
+        replaced with a marker string rather than recursed into.
     """
     if value is None or isinstance(value, str | bool | int | float):
         return value
+    if _depth >= _MAX_STATE_DEPTH:
+        # Truncated, not raised: this is client-supplied state being rendered, and a run
+        # that dies here would break the mandatory RUN_STARTED/RUN_FINISHED bracketing.
+        return f"<truncated at depth {_MAX_STATE_DEPTH}>"
     if isinstance(value, dict):
-        return {str(k): json_safe(v) for k, v in cast("dict[Any, Any]", value).items()}
+        return {str(k): json_safe(v, _depth + 1) for k, v in cast("dict[Any, Any]", value).items()}
     if isinstance(value, list | tuple):
-        return [json_safe(v) for v in cast("list[Any]", value)]
+        return [json_safe(v, _depth + 1) for v in cast("list[Any]", value)]
     # Stringified rather than raising: state is rendered, not executed, and a run that
     # dies at encode time is worse than one that shows a repr.
     return str(value)
+
+
+_SECRET_PATTERNS = (
+    # JWTs (Azure AD tokens), storage account keys, and OpenAI-style keys. Matched on
+    # shape rather than on a list of known field names, because the exception strings
+    # these arrive in are written by upstream SDKs and change without notice.
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"),
+    re.compile(r"(?i)\bBearer\s+\S+"),
+    re.compile(r"(?i)\b(?:AccountKey|SharedAccessSignature|api[-_]?key|password)\s*=\s*\S+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+)
+
+
+def redact_secrets(message: str) -> str:
+    """Strip credential-shaped substrings from text bound for a browser.
+
+    `RUN_ERROR` and `toolFailures` are read by whoever opened the page, and the strings
+    they carry come from upstream SDK exceptions — `azure-ai-projects`, `openai` — which
+    are free to include a token, a connection string, or an account key. Redacting at the
+    boundary is the only place that covers every source at once.
+
+    Args:
+        message: The raw exception text.
+
+    Returns:
+        The same text with credential-shaped runs replaced by `[redacted]`.
+    """
+    for pattern in _SECRET_PATTERNS:
+        message = pattern.sub("[redacted]", message)
+    return message
 
 
 _TERMINAL_TYPES = frozenset((ag_ui_core.EventType.RUN_FINISHED, ag_ui_core.EventType.RUN_ERROR))
@@ -384,7 +428,7 @@ def _completion_delta(
                 {
                     "toolCallId": result.call_id,
                     "error": type(result.failure).__name__,
-                    "message": str(result.failure),
+                    "message": redact_secrets(str(result.failure)),
                 },
             )
         )
@@ -412,9 +456,17 @@ async def run_stream(
         AG-UI events in wire order.
     """
     yield ag_ui_core.RunStartedEvent(thread_id=run_input.thread_id, run_id=run_input.run_id)
-    run_state = _RunState(seed_state(run_input))
+    # Built defensively: seeding reads client-supplied state, so a hostile body must not
+    # be able to raise between RUN_STARTED and the terminal event and leave the run
+    # unbracketed. A failure here still produces a legal stream.
+    try:
+        run_state = _RunState(seed_state(run_input))
+        snapshot = json_safe(run_state.state)
+    except Exception as exc:
+        yield ag_ui_core.RunErrorEvent(message=redact_secrets(str(exc)))
+        return
     run_state.phase = "OPEN"
-    yield ag_ui_core.StateSnapshotEvent(snapshot=json_safe(run_state.state))
+    yield ag_ui_core.StateSnapshotEvent(snapshot=snapshot)
     message_id: str | None = None
     # Populated by _record_result, which fires on agent.hooks - possibly nested inside
     # agent.stream_async's own frame, never inside this generator's own body, so it can't
@@ -508,7 +560,7 @@ async def run_stream(
             yield _completion_delta(run_state, result)
         if message_id is not None:
             yield ag_ui_core.TextMessageEndEvent(message_id=message_id)
-        yield ag_ui_core.RunErrorEvent(message=str(exc))
+        yield ag_ui_core.RunErrorEvent(message=redact_secrets(str(exc)))
         return
     finally:
         agent.hooks.remove_callback(AfterToolCallEvent, _record_result)

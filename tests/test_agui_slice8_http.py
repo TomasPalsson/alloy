@@ -160,6 +160,10 @@ def test_b41_run_error_message_carries_no_token_material() -> None:
     frames = _frames(serve.dispatch("POST", "/", _body(), _always(_Exploding())))
     error = [f for f in frames if f["type"] == "RUN_ERROR"]
     assert len(error) == 1
+    # The message is preserved when it holds nothing sensitive. The case that actually
+    # tests redaction — an exception whose text CONTAINS a token — lives in
+    # tests/test_agui_security.py, because this one raises a message that never had a
+    # secret in it and so cannot tell redaction-works from redaction-absent.
     assert error[0]["message"] == "backend rejected the request"
 
 
