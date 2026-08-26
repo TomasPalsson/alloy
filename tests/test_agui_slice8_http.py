@@ -316,3 +316,21 @@ def test_an_unseen_thread_records_its_conversation_for_the_next_run() -> None:
         "a first run must record the conversation it created, or the second run on this "
         "thread starts over"
     )
+
+
+def test_handler_class_routes_options_and_sends_cors_headers() -> None:
+    # Caught live, not by the dispatch-level tests above: `dispatch` handled OPTIONS
+    # correctly the whole time, but BaseHTTPRequestHandler only routes verbs it has a
+    # `do_<VERB>` method for, so a real preflight got 501 and the browser never sent the
+    # POST. Testing `dispatch` directly bypassed the exact layer that was broken.
+    handler = serve._make_handler(_always(_FakeAgent()))
+    assert hasattr(handler, "do_OPTIONS"), (
+        "BaseHTTPRequestHandler answers 501 for any verb with no do_<VERB> method, so a "
+        "CORS preflight fails and the browser never sends the real request"
+    )
+
+
+def test_every_cors_header_the_preflight_needs_is_declared() -> None:
+    assert serve.CORS_HEADERS["Access-Control-Allow-Origin"] == "*"
+    assert "content-type" in serve.CORS_HEADERS["Access-Control-Allow-Headers"].lower()
+    assert "POST" in serve.CORS_HEADERS["Access-Control-Allow-Methods"]

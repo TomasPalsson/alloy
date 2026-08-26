@@ -293,26 +293,47 @@ def _make_handler(agent_factory: Callable[[], Agent]) -> type[BaseHTTPRequestHan
             """Handle a POST request by delegating to `dispatch`."""
             self._respond()
 
+        def do_OPTIONS(self) -> None:
+            """Answer a CORS preflight.
+
+            This method must exist even though `dispatch` already handles OPTIONS:
+            `BaseHTTPRequestHandler` answers 501 for any verb it has no `do_<VERB>` for,
+            and never reaches `dispatch` at all. A preflight that 501s means the browser
+            never sends the real POST.
+            """
+            self._respond()
+
         def _respond(self) -> None:
             """Read the body, call `dispatch`, and write back a JSON or SSE response."""
             length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(length) if length else b""
             outcome = dispatch(self.command, self.path, raw_body, agent_factory)
             if isinstance(outcome, tuple):
-                status, body = outcome
+                status, body = outcome[0], outcome[1]
                 payload = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(payload)
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
+                self._send_cors_headers()
                 self.end_headers()
                 for frame in outcome:
                     self.wfile.write(frame.encode())
                     self.wfile.flush()
+
+        def _send_cors_headers(self) -> None:
+            """Attach the CORS headers to whatever response is being written.
+
+            On every response, not only the preflight: a browser rejects the actual
+            response too if the origin header is missing from it.
+            """
+            for name, value in CORS_HEADERS.items():
+                self.send_header(name, value)
 
         def log_message(self, format: str, *args: Any) -> None:
             """Silence the default per-request access log; startup already prints the bind."""
