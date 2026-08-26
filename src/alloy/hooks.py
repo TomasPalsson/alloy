@@ -116,6 +116,17 @@ class HookRegistry:
         """
         self._callbacks.setdefault(event_type, []).append(callback)
 
+    def remove_callback(self, event_type: type[TEvent], callback: Callable[[TEvent], None]) -> None:
+        """Undo one `add_callback`; a no-op if `callback` is not registered for `event_type`.
+
+        Args:
+            event_type: The event class `callback` was registered under.
+            callback: The exact callback instance to remove.
+        """
+        callbacks = self._callbacks.get(event_type)
+        if callbacks is not None and callback in callbacks:
+            callbacks.remove(callback)
+
     def add_hook(self, provider: HookProvider) -> None:
         """Let `provider` register its callbacks on this registry.
 

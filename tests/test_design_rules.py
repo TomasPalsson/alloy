@@ -57,14 +57,17 @@ def test_b30_no_utils_module_exists() -> None:
     assert "utils" not in names
 
 
-def test_b30_exactly_two_async_defs_in_package() -> None:
-    count = sum(
-        1
+def test_b30_async_defs_are_the_three_declared_entry_points() -> None:
+    found = {
+        node.name
         for path in _module_files()
         for node in ast.walk(_parse(path))
         if isinstance(node, ast.AsyncFunctionDef)
-    )
-    assert count == 2
+    }
+    # The rule is about async ENTRY POINTS, not a count. invoke_async and stream_async each
+    # own a thread hop; run_stream owns none — it only consumes stream_async's iterator.
+    # A fourth async def means a new hop nobody reviewed, so this stays an exact set.
+    assert found == {"invoke_async", "stream_async", "run_stream"}
 
 
 def test_b30_no_retry_primitives_outside_tests() -> None:

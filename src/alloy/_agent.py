@@ -11,7 +11,9 @@ from typing import Any, cast
 from . import _foundry, contracts
 from ._loop import (
     extract_final_text_from_stream_event,
+    extract_tool_argument_delta,
     extract_tool_call_from_stream_item,
+    extract_tool_call_start,
     extract_tool_calls,
     run_calls,
     translate_stream_event,
@@ -61,6 +63,7 @@ class Agent:
         credential: object | None = None,
         client: object | None = None,
         hooks: Sequence[HookProvider] = (),
+        conversation_id: str | None = None,
     ) -> None:
         self._model = model
         self._system_prompt = system_prompt
@@ -81,7 +84,10 @@ class Agent:
         # too); the real path below replaces this with the actual AIProjectClient.
         self._project_client = client
         self._messages: list[contracts.Message] = []
-        self._conversation_id: str | None = None
+        # Seeded, not always None: an agent built against an existing conversation resumes
+        # it, which is what lets one AG-UI thread span many runs. Fixed at construction —
+        # `_prepare_call` only mints one when this is still None.
+        self._conversation_id: str | None = conversation_id
         self._hooks = HookRegistry()
         for provider in hooks:
             self._hooks.add_hook(provider)
@@ -95,6 +101,11 @@ class Agent:
     def tool(self) -> _ToolNamespace:
         """Direct, model-free invocation of this agent's own tools by name."""
         return _ToolNamespace(self._tool_map)
+
+    @property
+    def conversation_id(self) -> str | None:
+        """The backend conversation this agent is bound to, or None until its first run."""
+        return self._conversation_id
 
     @property
     def hooks(self) -> HookRegistry:
@@ -211,6 +222,10 @@ class Agent:
             text_parts: list[str] = []
             final_text: str | None = None
             pending_calls: list[contracts.ToolCall] = []
+            # Argument-delta events carry only `item_id`; the `call_id` every other layer
+            # uses appears once, on the `output_item.added` event that opens the call.
+            # Per-turn, because item ids are only unique within one response.
+            call_id_by_item_id: dict[str, str] = {}
 
             loop = asyncio.get_running_loop()
             queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -260,6 +275,21 @@ class Agent:
                     if text_event is not None:
                         text_parts.append(cast(str, text_event["data"]))
                         yield text_event
+
+                    started = extract_tool_call_start(raw_event)
+                    if started is not None:
+                        call_id_by_item_id[str(raw_event.item.id)] = started.call_id
+                        yield {"tool_call_started": started}
+
+                    argument_delta = extract_tool_argument_delta(raw_event)
+                    if argument_delta is not None:
+                        item_id, fragment = argument_delta
+                        # No mapping means the deltas arrived without their opening event.
+                        # Drop rather than invent an id: a fragment attributed to the wrong
+                        # call corrupts that call's arguments silently.
+                        known_call_id = call_id_by_item_id.get(item_id)
+                        if known_call_id is not None:
+                            yield {"tool_arguments_delta": (known_call_id, fragment)}
 
                     call = extract_tool_call_from_stream_item(raw_event)
                     if call is not None:

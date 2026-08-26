@@ -144,6 +144,41 @@ def extract_tool_call_from_stream_item(raw_event: Any) -> ToolCall | None:
     return ToolCall(call_id=str(item.call_id), name=str(item.name), arguments=str(item.arguments))
 
 
+def extract_tool_call_start(raw_event: Any) -> ToolCall | None:
+    """Pull a STARTING tool call off a `response.output_item.added` event, if it holds one.
+
+    Sibling of `extract_tool_call_from_stream_item`, which reads the `.done` twin. This one
+    fires early — before any argument fragment arrives — so a caller can announce the call
+    and then stream its arguments into it. `arguments` is therefore always `""` here; the
+    complete value comes from the `.done` event.
+
+    The same raw event type also carries `reasoning` and `message` items, so the
+    `function_call` check is what stops a caller mapping the wrong id.
+    """
+    if getattr(raw_event, "type", None) != "response.output_item.added":
+        return None
+    item = raw_event.item
+    if getattr(item, "type", None) != "function_call":
+        return None
+    return ToolCall(call_id=str(item.call_id), name=str(item.name), arguments="")
+
+
+def extract_tool_argument_delta(raw_event: Any) -> tuple[str, str] | None:
+    """Pull one streamed argument fragment off a raw event, as `(item_id, delta)`.
+
+    Returns the event's `item_id`, NOT a `call_id`: verified against live Azure, this event
+    carries only `delta`, `item_id`, `output_index`, `sequence_number` and `type`. Resolving
+    `item_id` to a `call_id` is the caller's job, using the `item.id` on the matching
+    `extract_tool_call_start` event — the two are the same value.
+
+    One fragment is NOT valid JSON. A real two-argument call streams `'{"'`, `'city'`,
+    `'":"'`, `'Re'`, `'yk'`, … — only the concatenation parses.
+    """
+    if getattr(raw_event, "type", None) != "response.function_call_arguments.delta":
+        return None
+    return str(raw_event.item_id), str(raw_event.delta)
+
+
 def extract_final_text_from_stream_event(raw_event: Any) -> str | None:
     """Pull the finalized assistant text off a `response.output_text.done` event."""
     if getattr(raw_event, "type", None) == "response.output_text.done":
