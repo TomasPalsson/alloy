@@ -3,9 +3,11 @@
 Requires the `agui` extra. Importing this module without it fails loudly, so alloy's
 zero-dependency core never pulls in `ag-ui-protocol` unless a caller opts in.
 
-`run_stream` and `check_conformance` are implemented; every other function below still
-raises `NotImplementedError` until its slice lands — do not change a signature without
-updating every later slice.
+What this module does NOT do, deliberately: human-in-the-loop (`Interrupt`/`ResumeEntry`),
+reasoning or thinking events, multi-agent, and multimodal input. `capabilities()` declares
+none of them — a client that trusts an overstated declaration renders an approval button
+that hangs forever, or an empty reasoning pane, and the failure looks like the frontend's
+bug rather than a false claim here.
 
 Ordering rules a produced stream must obey (enforced by `check_conformance`):
 
@@ -48,6 +50,7 @@ AGUI_EXTRA_HINT = "install the AG-UI extra: pip install 'alloy-foundry[agui]'"
 
 try:
     import ag_ui.core as ag_ui_core
+    from ag_ui.core.capabilities import StateCapabilities, ToolsCapabilities
     from pydantic import ValidationError as PydanticValidationError
 except ImportError:
     raise ImportError(AGUI_EXTRA_HINT) from None
@@ -282,7 +285,21 @@ def capabilities() -> ag_ui_core.AgentCapabilities:
     Returns:
         The declared agent capabilities.
     """
-    raise NotImplementedError
+    # Only what is actually built. A declaration that overstates is worse than none: a
+    # client that trusts it renders affordances this server cannot honour — an approval
+    # button that hangs forever, an empty reasoning pane — and the failure looks like the
+    # frontend's bug rather than a false claim here.
+    return ag_ui_core.AgentCapabilities(
+        state=StateCapabilities(
+            snapshots=True,
+            deltas=True,
+            # Conversation history lives in the backend, not in this process; the thread
+            # map holds two strings and is lost on restart.
+            memory=False,
+            persistent_state=False,
+        ),
+        tools=ToolsCapabilities(),
+    )
 
 
 def latest_user_prompt(run_input: ag_ui_core.RunAgentInput) -> str:

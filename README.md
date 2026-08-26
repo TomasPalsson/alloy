@@ -108,6 +108,77 @@ its result. Callbacks are synchronous, called inline, on all three call paths.
 
 See `examples/hooks.py` for a runnable audit-and-guardrail demo.
 
+## AG-UI
+
+alloy speaks the [AG-UI protocol](https://docs.ag-ui.com), so any AG-UI client can drive an
+agent and watch it stream. Install the extra:
+
+```bash
+pip install 'alloy-foundry[agui]'
+```
+
+The core install is untouched by this — `ag-ui-protocol` is pre-1.0 and moving (its event
+count went 33 to 36 during this build), so it stays out of every install that does not ask
+for it.
+
+Two entry points. A transport-agnostic translator:
+
+```python
+from alloy import Agent
+from alloy.agui import run_stream, parse_run_input
+
+run_input = parse_run_input(request_body)          # bytes -> RunAgentInput
+async for event in run_stream(agent, run_input):   # -> AG-UI events
+    ...
+```
+
+…and a runnable server (`examples/serve.py`) exposing `POST /`:
+
+```bash
+export AZURE_AI_PROJECT_ENDPOINT=https://<project>.services.ai.azure.com/api/projects/<name>
+az login
+uv run examples/serve.py
+
+curl -N -X POST localhost:8080/ \
+  -H 'Content-Type: application/json' -H 'Accept: text/event-stream' \
+  -d '{"threadId":"t1","runId":"r1","state":{},"tools":[],"context":[],"forwardedProps":{},
+       "messages":[{"id":"m1","role":"user","content":"is checkout-api ok?"}]}'
+```
+
+### What you get
+
+Text streams token by token. Tool arguments stream **fragment by fragment** — a real
+two-argument call arrives as 13 pieces (`'{"'`, `'city'`, `'":"'`, `'Re'`, …) that
+concatenate to the JSON, so a UI can render them typing out. Tool results reach the wire
+too, sourced from the `AfterToolCallEvent` hook, because alloy's own stream never carried
+them. Live agent state ships as a snapshot plus RFC 6902 patches.
+
+Conversations survive across runs: an AG-UI `threadId` maps to an Azure Foundry
+conversation, which is the same idea — server-held history addressed by a client-supplied
+id. Without that an agent forgets everything after the first message.
+
+### Conformance
+
+`alloy.agui.check_conformance(events)` validates a stream against eleven ordering rules.
+There is **no validator in the Python AG-UI SDK**, so this is alloy's own.
+
+Rule 8 is the one worth knowing: **a text message and a tool call are never open at the
+same time.** It is not in the published protocol docs — it comes from `verifyEvents` in
+`@ag-ui/client`, which is strictly single-threaded and rejects any other event while a tool
+call is open. An interleaved stream passes rules 1-7 and is still refused by a real
+frontend.
+
+### Known limits
+
+- **No human-in-the-loop, reasoning events, multi-agent, or multimodal.** `capabilities()`
+  declares none of them rather than overstating.
+- **The thread map is process-local.** Correct for one long-lived server. On a
+  multi-instance or scale-to-zero host, a second run can land on an instance that never saw
+  the first and the agent silently forgets. Swap `ThreadStore` for a shared store — it is
+  three methods.
+- **The example server has no auth.** It binds loopback and warns when told not to. CORS is
+  wide open on purpose, so a local page can drive it.
+
 ## Design principles
 
 Borrowed from Strands, held as binding:
